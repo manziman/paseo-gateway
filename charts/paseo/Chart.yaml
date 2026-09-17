@@ -1,6 +1,6 @@
 apiVersion: v2
 name: paseo-kubernetes
-description: Single-owner Paseo gateway and Kubernetes workspace controller (experimental POC)
+description: Independent community gateway for Paseo on Kubernetes; not affiliated with or endorsed by Paseo (experimental POC)
 type: application
 version: 0.1.0
 appVersion: 0.1.0-poc.1

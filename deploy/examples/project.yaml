@@ -1,4 +1,4 @@
-apiVersion: paseo.dev/v1alpha1
+apiVersion: paseo-gateway.manziman.github.io/v1alpha1
 kind: PaseoProject
 metadata:
   name: hello-world

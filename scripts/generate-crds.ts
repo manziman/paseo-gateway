@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { z } from "zod";
-import { ProjectSchema, WorkspaceSchema } from "../src/domain.js";
+import { API_GROUP, ProjectSchema, WorkspaceSchema } from "../src/domain.js";
 
 function structural(value: unknown): void {
   if (!value || typeof value !== "object") return;
@@ -51,9 +51,9 @@ for (const [kind, plural, singular, schema] of [
   const crd = {
     apiVersion: "apiextensions.k8s.io/v1",
     kind: "CustomResourceDefinition",
-    metadata: { name: `${plural}.paseo.dev` },
+    metadata: { name: `${plural}.${API_GROUP}` },
     spec: {
-      group: "paseo.dev",
+      group: API_GROUP,
       scope: "Namespaced",
       names: { kind, plural, singular },
       versions: [

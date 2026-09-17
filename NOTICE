@@ -1,5 +1,8 @@
-Paseo Kubernetes
-Copyright 2026 Paseo Kubernetes contributors
+Paseo Gateway
+Copyright 2026 Paseo Gateway contributors
+
+This is an independent project. It is not affiliated with or endorsed by Paseo
+or its maintainers.
 
 This independent project uses unmodified upstream Paseo packages and container images.
 Paseo: Copyright (c) 2025-present Mohamed Boudra, Apache License 2.0.

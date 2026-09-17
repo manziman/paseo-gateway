@@ -15,6 +15,9 @@ flowchart LR
   Pods --> Volumes[Private retained PVCs]
 ```
 
+Both CRDs use the repository-owner API group `paseo-gateway.manziman.github.io`.
+The project is independent and is not affiliated with or endorsed by Paseo.
+
 `PaseoProject` stores repository configuration and exists without a workspace.
 `PaseoWorkspace` stores desired residency, project and credential references.
 Its status contains readiness, conditions and a PVC reference. No transcripts,

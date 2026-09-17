@@ -1,5 +1,10 @@
 import type { V1Pod } from "@kubernetes/client-node";
-import type { Project, Workspace, WorkspaceStatus } from "../domain.js";
+import {
+  type Project,
+  WORKSPACE_UID_LABEL,
+  type Workspace,
+  type WorkspaceStatus,
+} from "../domain.js";
 import type { Infrastructure, InfrastructureKind, Store } from "../kubernetes/store.js";
 import { statusCode } from "../kubernetes/store.js";
 import { desiredResources, type RuntimeConfig, resourceName } from "./resources.js";
@@ -14,7 +19,7 @@ export class WorkspaceController {
   private async ensure(kind: InfrastructureKind, desired: Infrastructure, workspace: Workspace) {
     const existing = await this.store.get(kind, resourceName(workspace));
     if (existing) {
-      if (existing.metadata?.labels?.["paseo.dev/workspace-uid"] !== workspace.metadata.uid) {
+      if (existing.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid) {
         throw new Error("Resource name collision: refusing to adopt an unowned resource");
       }
       return existing;
@@ -60,7 +65,7 @@ export class WorkspaceController {
     const name = resourceName(workspace);
     if (workspace.spec.residency !== "Running") {
       const pod = await this.store.get("Pod", name);
-      if (pod && pod.metadata?.labels?.["paseo.dev/workspace-uid"] !== workspace.metadata.uid)
+      if (pod && pod.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
         throw new Error("Refusing to delete an unowned pod");
       if (pod?.metadata?.uid && !pod.metadata.deletionTimestamp)
         await this.store.deletePod(name, pod.metadata.uid);

@@ -1,4 +1,7 @@
-# Paseo Kubernetes: open-source v0.1 specification
+# Paseo Gateway: independent open-source v0.1 specification
+
+This is an independent project. It is not affiliated with or endorsed by Paseo
+or its maintainers.
 
 Status: proposed scope, with accepted project constraints. Date: 2026-09-17.
 

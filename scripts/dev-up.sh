@@ -2,6 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bash scripts/doctor.sh
+node --import tsx scripts/check-api-upgrade.ts
 npm run check
 npm run generate:crds
 helm lint charts/paseo

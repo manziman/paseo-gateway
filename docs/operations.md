@@ -1,14 +1,40 @@
 # Operations
 
+## API-group transition
+
+The API group and custom label prefix are `paseo-gateway.manziman.github.io`,
+scoped to the repository owner’s GitHub namespace. These identifiers do not
+claim ownership of an upstream domain or imply upstream endorsement.
+
+The first local POC used a different API group. That running installation
+cannot be upgraded in place simply by applying the new CRDs: new records get
+new Kubernetes UIDs, while PVC names and ownership depend on the original UIDs.
+`dev:up` refuses to replace the gateway when it finds project/workspace records
+from a different API group in `paseo-system`.
+
+Keep the existing deployment and volumes until you have exported its records,
+backed up its identity/profile Secrets and PVC contents, and stopped its
+workspace compute using the old API group. Do not delete old CRDs, namespaces,
+or PVCs as a migration shortcut. For a separate fresh installation, use a new
+namespace with the new chart and separately provisioned Secrets. Recreate
+project/workspace records under the new group and restore data from verified
+backups while compute is stopped. This POC has no automated cross-group data
+migration or PVC adoption. Keep the old installation available until restoration
+and any changed workspace paths/IDs have been verified.
+
+The namespace used by local convenience scripts is fixed to `paseo-system`;
+manual Helm installations in another namespace require explicit configuration.
+Changing the code in Git does not change the existing running cluster.
+
 ## Lifecycle and recovery
 
 Local examples always name the Docker Desktop context and `paseo-system`
 namespace. Change an individual workspace's residency to stop or resume compute:
 
 ```sh
-kubectl --context docker-desktop -n paseo-system patch paseoworkspace WORKSPACE \
+kubectl --context docker-desktop -n paseo-system patch paseoworkspaces.paseo-gateway.manziman.github.io WORKSPACE \
   --type merge -p '{"spec":{"residency":"Suspended"}}'
-kubectl --context docker-desktop -n paseo-system patch paseoworkspace WORKSPACE \
+kubectl --context docker-desktop -n paseo-system patch paseoworkspaces.paseo-gateway.manziman.github.io WORKSPACE \
   --type merge -p '{"spec":{"residency":"Running"}}'
 ```
 
@@ -80,8 +106,8 @@ image only after an explicit idle suspend/resume.
 ## Diagnostics
 
 ```sh
-kubectl --context docker-desktop -n paseo-system get paseoworkspaces,pods,pvc
-kubectl --context docker-desktop -n paseo-system describe paseoworkspace WORKSPACE
+kubectl --context docker-desktop -n paseo-system get paseoworkspaces.paseo-gateway.manziman.github.io,pods,pvc
+kubectl --context docker-desktop -n paseo-system describe paseoworkspaces.paseo-gateway.manziman.github.io WORKSPACE
 kubectl --context docker-desktop -n paseo-system logs deploy/paseo-gateway
 ```
 

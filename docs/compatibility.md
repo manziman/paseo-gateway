@@ -47,6 +47,12 @@ Desktop UI acceptance and the remaining failure scenarios below are separate.
 | Gateway replacement while a Claude turn runs | Pending live verification |
 | Actual desktop reconnect after an ambiguous mutation | Pending live verification |
 
+The live evidence above was captured before renaming the Kubernetes API group
+to `paseo-gateway.manziman.github.io`. The rename has type/unit/schema checks;
+the existing cluster remains on its original group. A fresh installation under
+the renamed group has not yet repeated the live acceptance suite. See the
+[transition constraints](operations.md#api-group-transition).
+
 ## POC boundaries
 
 - One trusted owner, one namespace and one active gateway. Direct desktop

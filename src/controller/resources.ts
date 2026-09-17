@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import type { V1PersistentVolumeClaim, V1Pod, V1Service } from "@kubernetes/client-node";
-import { API_VERSION, MANAGED_BY, type Project, type Workspace, workspacePath } from "../domain.js";
+import {
+  API_VERSION,
+  MANAGED_BY,
+  type Project,
+  WORKSPACE_UID_LABEL,
+  type Workspace,
+  workspacePath,
+} from "../domain.js";
 
 export interface RuntimeConfig {
   workspaceImage: string;
@@ -24,7 +31,7 @@ export function desiredResources(workspace: Workspace, project: Project, config:
   const labels = {
     "app.kubernetes.io/managed-by": MANAGED_BY,
     "app.kubernetes.io/component": "workspace",
-    "paseo.dev/workspace-uid": workspace.metadata.uid,
+    [WORKSPACE_UID_LABEL]: workspace.metadata.uid,
   };
   const metadata = { name, namespace: workspace.metadata.namespace, labels };
   const ownerReferences = [

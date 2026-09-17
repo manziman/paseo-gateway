@@ -14,13 +14,13 @@ kind: Role
 metadata:
   name: paseo-gateway
 rules:
-  - apiGroups: [paseo.dev]
+  - apiGroups: [paseo-gateway.manziman.github.io]
     resources: [paseoprojects]
     verbs: [get, list]
-  - apiGroups: [paseo.dev]
+  - apiGroups: [paseo-gateway.manziman.github.io]
     resources: [paseoworkspaces]
     verbs: [get, list, create, update]
-  - apiGroups: [paseo.dev]
+  - apiGroups: [paseo-gateway.manziman.github.io]
     resources: [paseoworkspaces/status]
     verbs: [get, update]
   - apiGroups: [""]

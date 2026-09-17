@@ -2,7 +2,7 @@
   "name": "paseo-kubernetes",
   "version": "0.1.0-poc.1",
   "private": true,
-  "description": "A Paseo-compatible host and workspace controller for Kubernetes",
+  "description": "An independent Paseo-compatible host and workspace controller for Kubernetes; not affiliated with or endorsed by Paseo",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

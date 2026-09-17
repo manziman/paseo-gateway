@@ -1,4 +1,7 @@
-# Paseo Kubernetes
+# Paseo Gateway (independent project)
+
+This is an independent project. It is not affiliated with or endorsed by Paseo
+or its maintainers.
 
 Run isolated Paseo workspaces on Kubernetes and expose them as one host to an
 unchanged Paseo client. One TypeScript service contains the gateway and workspace
@@ -8,6 +11,9 @@ controller. Workspace pods run the version-pinned upstream Paseo daemon.
 Claude Code workspaces with retained files/history and gateway replacement.
 See [compatibility and acceptance](docs/compatibility.md) for verified behavior,
 limitations, and the remaining live checks.
+
+Existing POC installations: read the [API-group transition](docs/operations.md#api-group-transition)
+before upgrading.
 
 ## Local setup
 
@@ -47,7 +53,7 @@ The configured **Hello World** project appears before a pod exists. Create two
 workspaces under it. Wait for `Ready` before starting Claude agents:
 
 ```sh
-kubectl --context docker-desktop -n paseo-system get paseoworkspaces -w
+kubectl --context docker-desktop -n paseo-system get paseoworkspaces.paseo-gateway.manziman.github.io -w
 ```
 
 The example uses a public repository. Create additional `PaseoProject` records

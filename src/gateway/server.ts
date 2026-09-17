@@ -147,7 +147,7 @@ export async function startGateway(options: ServerOptions) {
               payload: {
                 status: "server_info",
                 serverId: options.serverId,
-                hostname: "Paseo Kubernetes",
+                hostname: "Paseo Gateway (independent)",
                 version: "0.7.1",
                 permissions: [
                   "daemon.read",

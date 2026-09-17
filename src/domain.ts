@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const API_GROUP = "paseo.dev";
+export const API_GROUP = "paseo-gateway.manziman.github.io";
+export const WORKSPACE_UID_LABEL = `${API_GROUP}/workspace-uid`;
 export const API_VERSION = `${API_GROUP}/v1alpha1`;
 export const MANAGED_BY = "paseo-kubernetes";
 const name = z
