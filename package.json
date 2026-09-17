@@ -31,8 +31,8 @@
     "url": "https://github.com/manziman/paseo-gateway.git"
   },
   "dependencies": {
-    "@getpaseo/client": "0.7.1",
-    "@getpaseo/protocol": "0.7.1",
+    "@getpaseo/client": "0.8.0",
+    "@getpaseo/protocol": "0.8.0",
     "@kubernetes/client-node": "2.0.0",
     "ws": "8.21.3",
     "zod": "4.4.3"
