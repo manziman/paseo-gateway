@@ -1,0 +1,17 @@
+name: Bug report
+description: Report a reproducible gateway or workspace lifecycle issue
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include expected behavior and reproduction steps. Do not include tokens, prompts, or private repository content.
+    validations: {required: true}
+  - type: textarea
+    attributes:
+      label: Versions and environment
+      description: Gateway commit, Paseo client/daemon version, Kubernetes version, storage class, operating system.
+    validations: {required: true}
+  - type: textarea
+    attributes:
+      label: Sanitized diagnostics
+      description: Include workspace phase/conditions and relevant redacted logs.

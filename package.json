@@ -1,0 +1,48 @@
+{
+  "name": "paseo-kubernetes",
+  "version": "0.1.0-poc.1",
+  "private": true,
+  "description": "A Paseo-compatible host and workspace controller for Kubernetes",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --import tsx --watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "dev:doctor": "bash scripts/doctor.sh",
+    "dev:up": "bash scripts/dev-up.sh",
+    "dev:connect": "bash scripts/connect.sh",
+    "test:live": "node --import tsx scripts/live-test.ts",
+    "generate:crds": "node --import tsx scripts/generate-crds.ts",
+    "credentials": "node --import tsx scripts/credentials.ts",
+    "test:upstream": "node --import tsx scripts/upstream-test.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manziman/paseo-gateway.git"
+  },
+  "dependencies": {
+    "@getpaseo/client": "0.7.1",
+    "@getpaseo/protocol": "0.7.1",
+    "@kubernetes/client-node": "2.0.0",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/node": "24.13.5",
+    "@types/ws": "8.18.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -7,8 +7,9 @@ Status: proposed scope, with accepted project constraints. Date: 2026-09-17.
 Build a standalone open-source project that runs Paseo workspaces on Kubernetes
 and exposes them as one host to the existing Paseo desktop/mobile client.
 The project has no workflow-engine dependency.
-EKS is the initial deployment target; keep AWS-specific settings in deployment
-configuration rather than the core execution model.
+Docker Desktop Kubernetes is the POC target. EKS remains a later deployment
+target; keep AWS-specific settings in deployment configuration rather than the
+core execution model.
 
 Accepted constraints:
 
@@ -22,8 +23,14 @@ volume, no durable operation journal and one active gateway instance. Kubernetes
 resources and existing workspace volumes hold necessary durable state; gateway
 caches are disposable. This is a persistence design, not a claim of zero state.
 
-This repository contains the standalone project specification.
-Implementation has not started; it does not add Kubernetes support to upstream Paseo.
+The initial POC uses one TypeScript service for both gateway and controller,
+Claude Code subscription authentication, and direct desktop connectivity.
+Tailscale remains external deployment infrastructure. Go is a future extraction
+option only if controller complexity justifies it.
+
+Implementation and its verified limits are tracked in [POC acceptance](docs/compatibility.md).
+This specification remains the full v0.1 release bar; the POC does not add
+Kubernetes support to upstream Paseo.
 
 ## Scope
 

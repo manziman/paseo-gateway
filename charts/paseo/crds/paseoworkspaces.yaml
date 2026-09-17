@@ -1,0 +1,215 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "paseoworkspaces.paseo.dev"
+  },
+  "spec": {
+    "group": "paseo.dev",
+    "scope": "Namespaced",
+    "names": {
+      "kind": "PaseoWorkspace",
+      "plural": "paseoworkspaces",
+      "singular": "paseoworkspace"
+    },
+    "versions": [
+      {
+        "name": "v1alpha1",
+        "served": true,
+        "storage": true,
+        "schema": {
+          "openAPIV3Schema": {
+            "type": "object",
+            "properties": {
+              "apiVersion": {
+                "type": "string",
+                "enum": [
+                  "paseo.dev/v1alpha1"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "PaseoWorkspace"
+                ]
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "spec": {
+                "type": "object",
+                "properties": {
+                  "projectRef": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "residency": {
+                    "default": "Running",
+                    "type": "string",
+                    "enum": [
+                      "Running",
+                      "Suspended",
+                      "Archived"
+                    ]
+                  },
+                  "credentialProfile": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  },
+                  "revision": {
+                    "default": "HEAD",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "branch": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "required": [
+                  "projectRef",
+                  "displayName",
+                  "residency",
+                  "credentialProfile",
+                  "revision"
+                ],
+                "x-kubernetes-validations": [
+                  {
+                    "rule": "self.projectRef == oldSelf.projectRef",
+                    "message": "projectRef is immutable"
+                  },
+                  {
+                    "rule": "self.credentialProfile == oldSelf.credentialProfile",
+                    "message": "credentialProfile is immutable"
+                  },
+                  {
+                    "rule": "self.revision == oldSelf.revision",
+                    "message": "revision is immutable"
+                  },
+                  {
+                    "rule": "has(self.branch) == has(oldSelf.branch)",
+                    "message": "branch presence is immutable"
+                  },
+                  {
+                    "rule": "!has(self.branch) || self.branch == oldSelf.branch",
+                    "message": "branch is immutable"
+                  }
+                ]
+              },
+              "status": {
+                "type": "object",
+                "properties": {
+                  "phase": {
+                    "type": "string",
+                    "enum": [
+                      "Pending",
+                      "Ready",
+                      "Suspended",
+                      "Archived",
+                      "Failed"
+                    ]
+                  },
+                  "observedGeneration": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "pvcName": {
+                    "type": "string"
+                  },
+                  "backendWorkspaceId": {
+                    "type": "string"
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "Ready"
+                          ]
+                        },
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "True",
+                            "False"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        },
+                        "observedGeneration": {
+                          "type": "number"
+                        },
+                        "lastTransitionTime": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "status",
+                        "reason",
+                        "message",
+                        "observedGeneration",
+                        "lastTransitionTime"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "phase",
+                  "observedGeneration",
+                  "message"
+                ]
+              }
+            },
+            "required": [
+              "apiVersion",
+              "kind",
+              "metadata",
+              "spec"
+            ]
+          }
+        },
+        "subresources": {
+          "status": {}
+        },
+        "additionalPrinterColumns": [
+          {
+            "name": "Project",
+            "type": "string",
+            "jsonPath": ".spec.projectRef"
+          },
+          {
+            "name": "Residency",
+            "type": "string",
+            "jsonPath": ".spec.residency"
+          },
+          {
+            "name": "Phase",
+            "type": "string",
+            "jsonPath": ".status.phase"
+          }
+        ]
+      }
+    ]
+  }
+}

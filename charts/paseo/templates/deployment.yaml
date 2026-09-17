@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paseo-gateway
+  labels:
+    app.kubernetes.io/name: paseo-kubernetes
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paseo-kubernetes
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: paseo-gateway
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PASEO_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: WORKSPACE_IMAGE
+              value: {{ .Values.workspace.image | quote }}
+            - name: WORKSPACE_IMAGE_PULL_POLICY
+              value: {{ .Values.workspace.pullPolicy | quote }}
+            - name: WORKSPACE_STORAGE_CLASS
+              value: {{ .Values.workspace.storageClass | quote }}
+            - name: WORKSPACE_STORAGE_SIZE
+              value: {{ .Values.workspace.storageSize | quote }}
+            - name: GATEWAY_ALLOWED_HOSTS
+              value: {{ .Values.gateway.allowedHosts | quote }}
+            - name: GATEWAY_PASSWORD_FILE
+              value: /identity/password
+            - name: GATEWAY_ID_FILE
+              value: /identity/serverId
+            - name: BACKEND_PASSWORD_FILE
+              value: /backend/password
+            - name: BACKEND_SECRET_NAME
+              value: {{ .Values.gateway.backendSecret | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          volumeMounts:
+            - {name: identity, mountPath: /identity, readOnly: true}
+            - {name: backend, mountPath: /backend, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: identity
+          secret:
+            secretName: {{ .Values.gateway.identitySecret }}
+            defaultMode: 0440
+        - name: backend
+          secret:
+            secretName: {{ .Values.gateway.backendSecret }}
+            defaultMode: 0440
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paseo-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: gateway
+  ports:
+    - {name: http, port: 8080, targetPort: http}

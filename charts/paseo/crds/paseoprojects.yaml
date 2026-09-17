@@ -1,0 +1,82 @@
+{
+  "apiVersion": "apiextensions.k8s.io/v1",
+  "kind": "CustomResourceDefinition",
+  "metadata": {
+    "name": "paseoprojects.paseo.dev"
+  },
+  "spec": {
+    "group": "paseo.dev",
+    "scope": "Namespaced",
+    "names": {
+      "kind": "PaseoProject",
+      "plural": "paseoprojects",
+      "singular": "paseoproject"
+    },
+    "versions": [
+      {
+        "name": "v1alpha1",
+        "served": true,
+        "storage": true,
+        "schema": {
+          "openAPIV3Schema": {
+            "type": "object",
+            "properties": {
+              "apiVersion": {
+                "type": "string",
+                "enum": [
+                  "paseo.dev/v1alpha1"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "PaseoProject"
+                ]
+              },
+              "metadata": {
+                "type": "object"
+              },
+              "spec": {
+                "type": "object",
+                "properties": {
+                  "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "repository": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "revision": {
+                    "default": "HEAD",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "credentialProfile": {
+                    "type": "string",
+                    "maxLength": 63,
+                    "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                  }
+                },
+                "required": [
+                  "displayName",
+                  "repository",
+                  "revision",
+                  "credentialProfile"
+                ]
+              }
+            },
+            "required": [
+              "apiVersion",
+              "kind",
+              "metadata",
+              "spec"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

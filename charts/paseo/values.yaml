@@ -1,0 +1,22 @@
+image:
+  repository: paseo-gateway
+  tag: dev
+  pullPolicy: IfNotPresent
+workspace:
+  image: paseo-workspace:dev
+  pullPolicy: IfNotPresent
+  storageClass: ""
+  storageSize: 5Gi
+gateway:
+  allowedHosts: localhost,127.0.0.1
+  identitySecret: paseo-identity
+  backendSecret: paseo-backend
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+networkPolicy:
+  enabled: true

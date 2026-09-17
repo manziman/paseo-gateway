@@ -1,0 +1,9 @@
+Paseo Kubernetes
+Copyright 2026 Paseo Kubernetes contributors
+
+This independent project uses unmodified upstream Paseo packages and container images.
+Paseo: Copyright (c) 2025-present Mohamed Boudra, Apache License 2.0.
+https://github.com/getpaseo/paseo
+
+Third-party packages and image contents retain their respective licenses and notices.
+Claude Code is installed from its official npm package and is not licensed by this project.

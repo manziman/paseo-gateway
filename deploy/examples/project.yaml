@@ -1,0 +1,9 @@
+apiVersion: paseo.dev/v1alpha1
+kind: PaseoProject
+metadata:
+  name: hello-world
+spec:
+  displayName: Hello World
+  repository: https://github.com/octocat/Hello-World.git
+  revision: HEAD
+  credentialProfile: claude-default
