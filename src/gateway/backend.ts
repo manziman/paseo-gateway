@@ -27,7 +27,7 @@ export class PaseoBackend implements Backend {
     {
       resolve: (message: SessionOutboundMessage) => void;
       reject: (error: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
+      timer: ReturnType<typeof setTimeout> | undefined;
     }
   >();
 
@@ -131,15 +131,26 @@ export class PaseoBackend implements Backend {
       throw new Error("Correlated request required");
     const requestId = message.requestId;
     if (this.pending.has(requestId)) throw new Error("Duplicate in-flight request ID");
+    // Upstream wait-for-finish is a long poll: omitted/nonpositive timeouts wait until
+    // completion or disconnect. Match the SDK's five-second response grace period.
+    const deadline =
+      message.type === "wait_for_finish_request"
+        ? message.timeoutMs && message.timeoutMs > 0
+          ? Math.min(message.timeoutMs + 5000, 2 ** 31 - 1)
+          : undefined
+        : this.timeoutMs;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(
-          new Error(
-            "Workspace response lost or timed out; outcome may be unknown. Inspect before retrying.",
-          ),
-        );
-      }, this.timeoutMs);
+      const timer =
+        deadline === undefined
+          ? undefined
+          : setTimeout(() => {
+              this.pending.delete(requestId);
+              reject(
+                new Error(
+                  "Workspace response lost or timed out; outcome may be unknown. Inspect before retrying.",
+                ),
+              );
+            }, deadline);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
         this.send(message);

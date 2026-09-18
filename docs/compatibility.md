@@ -31,7 +31,7 @@ Desktop UI acceptance and the remaining failure scenarios below are separate.
 
 | Check | Status |
 | --- | --- |
-| Unit tests and real SDK-to-gateway socket tests | Passed: 20 tests |
+| Unit tests and real SDK-to-gateway socket tests | Passed: 24 tests |
 | Two actual upstream daemons through the gateway | Passed |
 | Binary file isolation and terminal slot routing | Passed |
 | Gateway replacement retains running terminals | Passed |
@@ -44,14 +44,30 @@ Desktop UI acceptance and the remaining failure scenarios below are separate.
 | Concurrent real Claude prompts and timeline recovery | Passed: two pods, distinct assistant replies, history retained after gateway/pod replacement and suspend/resume |
 | Subscription token replacement/expiry | Pending live verification |
 | Unchanged desktop app end-to-end | Pending live verification |
-| Gateway replacement while a Claude turn runs | Pending live verification |
+| Gateway replacement while a Claude turn runs | Passed through the pinned SDK: same running turn ID after reconnect, expected completion, one original prompt |
 | Actual desktop reconnect after an ambiguous mutation | Pending live verification |
 
-The live evidence above was captured before renaming the Kubernetes API group
-to `paseo-gateway.manziman.github.io`. The rename has type/unit/schema checks;
-the existing cluster remains on its original group. A fresh installation under
-the renamed group has not yet repeated the live acceptance suite. See the
-[transition constraints](operations.md#api-group-transition).
+A fresh installation under `paseo-gateway.manziman.github.io` repeated the
+Claude-enabled recovery suite on 2026-09-18 in `paseo-validation`. It uses gateway
+and workspace image tag `dev-20260918100116-26510`. The original installation in
+`paseo-system` remains on its original group and was not migrated or replaced;
+its volumes remain intact. See the [transition constraints](operations.md#api-group-transition).
+
+This phase found and fixed permission request IDs being rewritten inside agent
+snapshots and a 55-second gateway deadline incorrectly truncating longer
+`wait_for_finish_request` calls. New regression tests cover both. The active-turn
+scenario also exposed the original 512 MiB gateway limit as insufficient;
+[measured memory usage and the revised budget](operations.md#gateway-memory-budget)
+are documented separately. The final chart passed the complete provider suite
+without instrumentation and with zero gateway container restarts. The two-daemon
+upstream suite passed again.
+
+The provider run checks two concurrent short prompts and a longer text response.
+It requires the long response's turn ID to remain active across gateway
+replacement, then checks all three histories after workspace pod replacement
+and suspend/resume. This proves the SDK path; it does not establish desktop UI
+behavior or loss-of-acknowledgement handling. Superseded test workspaces were
+archived with their PVCs retained.
 
 ## POC boundaries
 
@@ -81,3 +97,9 @@ the renamed group has not yet repeated the live acceptance suite. See the
 
 The full [v0.1 specification](../paseo-kubernetes-high-level-spec.md) remains the
 release bar. Passing the POC's automated checks is not full v0.1 acceptance.
+
+## Deferred post-MVP work
+
+- [Configurable advertised server information](https://github.com/manziman/paseo-gateway/issues/11)
+- [Redis-backed session storage and multi-replica HA evaluation](https://github.com/manziman/paseo-gateway/issues/12)
+- [Decomposition of complex protocol/lifecycle functions](https://github.com/manziman/paseo-gateway/issues/13)

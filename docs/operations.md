@@ -22,8 +22,22 @@ backups while compute is stopped. This POC has no automated cross-group data
 migration or PVC adoption. Keep the old installation available until restoration
 and any changed workspace paths/IDs have been verified.
 
-The namespace used by local convenience scripts is fixed to `paseo-system`;
-manual Helm installations in another namespace require explicit configuration.
+Local convenience scripts default to `paseo-system`. Set `PASEO_NAMESPACE` for
+all commands in a separate installation; each namespace gets its own identity,
+credentials, controller and workspace catalog. `dev:up` checks for incompatible
+API groups in the selected namespace before changing resources. For example:
+
+```sh
+export PASEO_NAMESPACE=paseo-validation
+npm run dev:up
+npm run credentials -- /absolute/path/to/claude-token
+RUN_CLAUDE_LIVE=1 npm run test:live
+PASEO_LOCAL_PORT=6769 npm run dev:connect
+```
+
+Use the selected namespace in manual `kubectl -n` commands too. Namespace names
+follow the [Kubernetes namespace rules](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/).
+This creates a fresh catalog; it does not migrate old workspaces or their data.
 Changing the code in Git does not change the existing running cluster.
 
 ## Lifecycle and recovery
@@ -53,7 +67,12 @@ destructive `down` command.
 Gateway replacement disconnects clients while agents keep running. A request
 whose response is lost may have executed. Inspect agent history before retrying;
 no mutation is automatically replayed. Reconnect creates a new directory
-generation and fetches full snapshots. Workspace pod replacement can interrupt
+generation and fetches full snapshots. Ordinary backend RPCs time out after
+55 seconds. The read-only `wait_for_finish_request` instead honors its requested
+timeout plus five seconds for delivery; an omitted/nonpositive timeout waits
+until completion or connection closure, matching the pinned upstream contract.
+This does not extend mutation deadlines or enable replay.
+Workspace pod replacement can interrupt
 an active turn even though files and provider history survive.
 
 One pod and a ReadWriteOnce PVC are sufficient for the local single-node POC,
@@ -102,6 +121,21 @@ history remain on the PVC. It relies on the single-writer and node-fencing
 constraints above. Local builds use a unique image tag each time
 to avoid stale images cached in kind. Existing workspace pods still adopt a new
 image only after an explicit idle suspend/resume.
+
+## Gateway memory budget
+
+The local chart requests 512 MiB and limits the gateway to 1 GiB, with
+`gateway.nodeOptions: --max-old-space-size=256`. A long Claude response during
+recovery exceeded the original 512 MiB container limit even though JavaScript
+heap use stayed below 150 MiB. An instrumented run peaked near 722 MiB RSS and
+then fell to about 565 MiB. These are workload observations, not a capacity
+or leak-free endurance guarantee.
+
+The [Node heap limit](https://nodejs.org/docs/latest-v24.x/api/cli.html#--max-old-space-sizesize-in-mib)
+does not cap total resident memory; leave room for native/runtime allocations.
+Measure memory and restarts under representative workloads before changing
+`resources` or `gateway.nodeOptions`. Temporary memory instrumentation is not
+part of the deployed chart.
 
 ## Diagnostics
 

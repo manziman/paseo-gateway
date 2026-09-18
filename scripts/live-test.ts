@@ -7,9 +7,9 @@ import { CoreV1Api, CustomObjectsApi } from "@kubernetes/client-node";
 import { resourceName } from "../src/controller/resources.js";
 import { API_GROUP, API_VERSION, workspacePath } from "../src/domain.js";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
+import { startActiveTurn, verifyActiveTurn } from "./active-turn.js";
+import { context, namespace } from "./local-config.js";
 
-const context = "docker-desktop";
-const namespace = "paseo-system";
 const config = loadKubernetesConfig(context);
 const api = config.makeApiClient(CoreV1Api);
 const store = new KubernetesStore(config, namespace);
@@ -193,7 +193,7 @@ try {
       assert.ok(workspace);
       providerAgents.push({ id: agent.id, marker: `PASEO_LIVE_OK_${workspace.id}` });
       const finished = await active.waitForFinish(agent.id, 120000);
-      if (finished.status === "error") throw new Error("Claude provider failed");
+      assert.equal(finished.status, "idle", "Claude must finish successfully");
     }
     await verifyProviderTimelines(active);
     console.log("PASS: concurrent Claude subscription prompts and recovered timelines.");
@@ -223,6 +223,7 @@ try {
   });
   const gatewayPod = gatewayPods.items.find((pod) => !pod.metadata?.deletionTimestamp);
   if (!gatewayPod?.metadata?.name || !gatewayPod.metadata.uid) throw new Error("No gateway pod");
+  const activeTurn = providerTest ? await startActiveTurn(active, first.id) : undefined;
   await active.close();
   proxy?.kill();
   await api.deleteNamespacedPod({
@@ -247,6 +248,10 @@ try {
   );
   active = await connect();
   assert.equal(observedServerId, initialServerId);
+  if (activeTurn) {
+    await verifyActiveTurn(active, activeTurn);
+    providerAgents.push(activeTurn);
+  }
   await verifyProviderTimelines(active);
   const newDirectory = await active.fetchWorkspaces();
   assert.ok(newDirectory.sync?.generation);
@@ -324,7 +329,7 @@ try {
   console.log("PASS: suspend/resume retains the same PVC and workspace file.");
   if (providerTest)
     console.log(
-      "PASS: both Claude timelines and single prompt occurrences survive gateway replacement, pod replacement and suspend/resume.",
+      "PASS: all three Claude timelines and single prompt occurrences survive gateway replacement, pod replacement and suspend/resume.",
     );
   console.log(
     "Workspaces retained for desktop inspection. Archive them through the client to stop compute.",

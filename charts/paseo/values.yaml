@@ -8,15 +8,16 @@ workspace:
   storageClass: ""
   storageSize: 5Gi
 gateway:
+  nodeOptions: --max-old-space-size=256
   allowedHosts: localhost,127.0.0.1
   identitySecret: paseo-identity
   backendSecret: paseo-backend
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 512Mi
   limits:
     cpu: "1"
-    memory: 512Mi
+    memory: 1Gi
 networkPolicy:
   enabled: true

@@ -25,6 +25,7 @@ const opaqueKeys = new Set([
   "config",
   "labels",
   "request",
+  "pendingPermissions",
   "resolution",
   "detail",
   "state",

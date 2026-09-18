@@ -19,9 +19,13 @@ before upgrading.
 
 Prerequisites: Node 24 (`nvm use`), npm, Docker Desktop with Kubernetes and the **containerd image store** enabled,
 kubectl, Helm 3 or 4, and a Claude subscription. Local commands explicitly use the
-`docker-desktop` context and namespace `paseo-system`; they never switch your
+`docker-desktop` context and default namespace `paseo-system`; they never switch your
 current kubectl context. Allow at least 4 CPUs, 8 GiB RAM, and 15 GiB **free inside Docker’s VM** for the
 cluster, images, and two workspaces; measure and adjust for your workloads.
+
+Set `PASEO_NAMESPACE` consistently across local commands for a separate installation
+(see [operations](docs/operations.md#api-group-transition)). `PASEO_LOCAL_PORT`
+overrides the desktop port-forward port, which defaults to `6768`.
 
 In Docker Desktop Settings → General, enable “Use containerd for pulling and
 storing images.” Apply before building; the kind provisioner requires it.

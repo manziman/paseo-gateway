@@ -5,7 +5,9 @@ and loopback WebSocket integration tests, then compiles the production service.
 Tests use the actual pinned Paseo schemas/client. Lifecycle tests cover
 idempotency, pod replacement, suspend/archive retention, foreign-resource
 collisions and terminating-pod handling. Routing tests cover ID encoding,
-conflicting routes, path traversal, content preservation and terminal slots.
+conflicting routes, path traversal, content preservation, permission request IDs in
+agent snapshots, and terminal slots. Backend deadline tests cover long agent waits,
+unbounded waits released on disconnect, and ordinary mutation timeouts without replay.
 
 `npm run test:upstream` starts two real upstream daemon containers from
 `paseo-workspace:dev`, fronts them with the gateway, and connects the actual
@@ -33,9 +35,22 @@ and a running terminal survive while the directory generation changes.
 The default run creates a separate infrastructure-only project and a clearly
 unusable credential profile; it does not require or invoke Claude.
 The opt-in variant starts concurrent Claude prompts with distinct markers and
-checks actual assistant replies. After gateway/pod replacement and suspend/resume,
-it checks both timelines again and asserts each original prompt occurs once. It leaves workspaces for desktop inspection. Each run creates new
+checks actual assistant replies. It also starts a bounded text-generation prompt
+and observes a running turn before replacing the gateway. After reconnect, it
+requires the same turn ID to still be running, no pending permissions, and
+completion with the expected final marker and exactly one original prompt.
+The test never resends that prompt. The longer response provides a replacement
+window; a run that reconnects after the turn finishes fails instead of claiming
+active-turn continuity. It adds up to roughly 3,000 generated words to the
+opt-in provider test.
+
+After gateway/pod replacement and suspend/resume,
+it checks all three agent timelines again in provider mode and asserts each original prompt occurs once. It leaves workspaces for desktop inspection. Each run creates new
 workspaces; archive them afterward to release compute.
+
+Set `PASEO_NAMESPACE` on setup, credential import, connection and live-test
+commands to target a separate installation. The default remains `paseo-system`;
+all Kubernetes access explicitly uses `docker-desktop`.
 
 Then exercise the desktop acceptance scenarios:
 

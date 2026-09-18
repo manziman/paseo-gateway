@@ -36,6 +36,28 @@ describe("routing", () => {
       agent: { id: scopedId("one", "abc"), provider: "claude" },
     });
   });
+  it("preserves permission request IDs in fetched agent snapshots", () => {
+    const permission = {
+      id: "permission-1",
+      provider: "claude",
+      name: "Bash",
+      kind: "tool",
+      input: { command: "sleep 60" },
+    };
+    const result = translate(
+      { agent: { id: "agent-1", provider: "claude", pendingPermissions: [permission] } },
+      workspace(),
+      "local",
+      "out",
+    );
+    expect(result).toEqual({
+      agent: {
+        id: scopedId("one", "agent-1"),
+        provider: "claude",
+        pendingPermissions: [permission],
+      },
+    });
+  });
   it("keeps identical terminal slots on separate backends distinct", () => {
     const slots = new TerminalSlots();
     const a = slots.outward("one", 1);

@@ -1,9 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { API_GROUP } from "../src/domain.js";
+import { context, namespace } from "./local-config.js";
 
-const context = "docker-desktop";
-const namespace = "paseo-system";
 function kubectl(args: string[]): unknown {
   return JSON.parse(
     execFileSync(

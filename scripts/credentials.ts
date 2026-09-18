@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { CoreV1Api } from "@kubernetes/client-node";
 import { loadKubernetesConfig } from "../src/kubernetes/client.js";
 import { statusCode } from "../src/kubernetes/store.js";
+import { context, namespace } from "./local-config.js";
 
 const file = process.argv[2];
 if (!file)
@@ -11,8 +12,7 @@ if (!file)
 const token = (await readFile(file, "utf8")).trim();
 if (!token || /\s/.test(token))
   throw new Error("Expected a file containing only the subscription token");
-const api = loadKubernetesConfig("docker-desktop").makeApiClient(CoreV1Api);
-const namespace = "paseo-system";
+const api = loadKubernetesConfig(context).makeApiClient(CoreV1Api);
 const name = "claude-default";
 try {
   const existing = await api.readNamespacedSecret({ namespace, name });

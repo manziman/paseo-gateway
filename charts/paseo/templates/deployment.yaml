@@ -42,6 +42,8 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            - name: NODE_OPTIONS
+              value: {{ .Values.gateway.nodeOptions | quote }}
             - name: PASEO_NAMESPACE
               valueFrom:
                 fieldRef:
