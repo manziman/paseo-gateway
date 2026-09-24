@@ -11,11 +11,13 @@ it("passes an upstream-supported TCP target when configured with a gateway WebSo
   const tokenFile = join(directory, "token");
   await writeFile(tokenFile, "fixture-password\n");
   try {
-    const source = `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {EventEmitter} from 'node:events'; cp.spawn=(_binary,args)=>{process.stdout.write(JSON.stringify(args));return new EventEmitter()}; syncBuiltinESMExports(); process.argv=['node','wrapper','ls']; await import(${JSON.stringify(pathToFileURL(resolve("docker/paseo-cli.mjs")).href)});`;
+    const source =
+      "import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {EventEmitter} from 'node:events'; cp.spawn=(_binary,args)=>{process.stdout.write(JSON.stringify(args));return new EventEmitter()}; syncBuiltinESMExports(); process.argv=['node','wrapper','ls']; await import(process.env.PASEO_WRAPPER_MODULE);";
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
       encoding: "utf8",
       env: {
         ...process.env,
+        PASEO_WRAPPER_MODULE: pathToFileURL(resolve("docker/paseo-cli.mjs")).href,
         PASEO_GATEWAY_URL: "ws://paseo-gateway.example.svc:8080/ws",
         PASEO_GATEWAY_TOKEN_FILE: tokenFile,
       },
@@ -54,11 +56,14 @@ it.each([
   const tokenFile = join(directory, "token");
   await writeFile(tokenFile, "fixture-password\n");
   try {
-    const source = `import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {EventEmitter} from 'node:events'; cp.spawn=(_binary,args,options)=>{process.stdout.write(JSON.stringify({args,agentId:options.env.PASEO_AGENT_ID}));return new EventEmitter()}; syncBuiltinESMExports(); process.argv=['node','wrapper',...${JSON.stringify(command.split(" "))}]; await import(${JSON.stringify(pathToFileURL(resolve("docker/paseo-cli.mjs")).href)});`;
+    const source =
+      "import cp from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module'; import {EventEmitter} from 'node:events'; cp.spawn=(_binary,args,options)=>{process.stdout.write(JSON.stringify({args,agentId:options.env.PASEO_AGENT_ID}));return new EventEmitter()}; syncBuiltinESMExports(); process.argv=['node','wrapper',...JSON.parse(process.env.PASEO_WRAPPER_ARGS)]; await import(process.env.PASEO_WRAPPER_MODULE);";
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
       encoding: "utf8",
       env: {
         ...process.env,
+        PASEO_WRAPPER_MODULE: pathToFileURL(resolve("docker/paseo-cli.mjs")).href,
+        PASEO_WRAPPER_ARGS: JSON.stringify(command.split(" ")),
         PASEO_GATEWAY_URL: "ws://paseo-gateway.example.svc:8080/ws",
         PASEO_GATEWAY_TOKEN_FILE: tokenFile,
         PASEO_CLUSTER_WORKSPACE_ID: "one",
@@ -77,11 +82,13 @@ it("rejects a heartbeat identity scoped to another workspace", async () => {
   const tokenFile = join(directory, "token");
   await writeFile(tokenFile, "fixture-password\n");
   try {
-    const source = `process.argv=['node','wrapper','heartbeat','create']; await import(${JSON.stringify(pathToFileURL(resolve("docker/paseo-cli.mjs")).href)});`;
+    const source =
+      "process.argv=['node','wrapper','heartbeat','create']; await import(process.env.PASEO_WRAPPER_MODULE);";
     const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
       encoding: "utf8",
       env: {
         ...process.env,
+        PASEO_WRAPPER_MODULE: pathToFileURL(resolve("docker/paseo-cli.mjs")).href,
         PASEO_GATEWAY_URL: "ws://paseo-gateway.example.svc:8080/ws",
         PASEO_GATEWAY_TOKEN_FILE: tokenFile,
         PASEO_CLUSTER_WORKSPACE_ID: "one",
