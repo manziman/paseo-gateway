@@ -40,7 +40,7 @@ below show the published OCI address; verify the desired version and registry
 visibility before using it.
 
 ```sh
-export CONTEXT=your-cluster-context NAMESPACE=paseo-system VERSION=1.0.0-alpha.2
+export CONTEXT=your-cluster-context NAMESPACE=paseo-system VERSION=1.0.0-alpha.3
 export CHART_DIR="$(mktemp -d)"
 helm pull oci://ghcr.io/manziman/charts/paseo-kubernetes \
   --version "$VERSION" --untar --untardir "$CHART_DIR"
