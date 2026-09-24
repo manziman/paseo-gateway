@@ -12,6 +12,7 @@ import {
   sha256,
   validateImage,
   validateInput,
+  verifyImage,
 } from "../scripts/release-artifacts.mjs";
 
 const version = "1.0.0-alpha.1";
@@ -156,4 +157,35 @@ test("first-publish GHCR denial needs exact owner allowlist and independent API 
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, env));
   status = "exists";
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, env));
+});
+
+// Classic Docker stores can associate a repository digest with only one platform.
+// Exercise the complete verification loop with that store contract.
+test("verification pulls each platform without overwriting an existing digest", (t) => {
+  const output = temporary(t);
+  const loaded = new Map();
+  const calls = [];
+  const index = manifest();
+  for (const entry of index.manifests) {
+    if (entry.platform)
+      entry.digest = `sha256:${(entry.platform.architecture === "amd64" ? "c" : "d").repeat(64)}`;
+  }
+  const command = (binary, args) => {
+    calls.push([binary, ...args]);
+    if (args.includes("--raw")) return JSON.stringify(index);
+    if (binary === "docker" && args[0] === "pull") {
+      const reference = args.at(-1);
+      const platform = args[args.indexOf("--platform") + 1];
+      if (loaded.has(reference) && loaded.get(reference) !== platform)
+        throw new Error(`cannot overwrite digest ${reference}`);
+      loaded.set(reference, platform);
+    }
+    if (args.includes("/inventory.mjs")) return '[{"name":"example","license":"MIT"}]';
+    if (args.includes("--format")) return '{"evidence":true}';
+    return "";
+  };
+  verifyImage("gateway", { repository: "example/gateway", digest }, version, output, command);
+  assert.equal(loaded.size, 2);
+  assert.ok([...loaded.keys()].every((reference) => !reference.endsWith(digest)));
+  assert.equal(calls.filter((args) => args[0] === "trivy").length, 6);
 });
