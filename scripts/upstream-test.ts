@@ -52,7 +52,7 @@ async function startDaemon(id: string) {
     `type=volume,source=${checkout},target=/workspaces/${id}`,
     "--entrypoint",
     "/bin/sh",
-    "paseo-workspace:dev",
+    process.env.UPSTREAM_TEST_IMAGE ?? "paseo-workspace:dev",
     "-c",
     setup,
   );
@@ -180,7 +180,7 @@ try {
     `type=volume,source=${prefix}-one-home,target=/home/paseo`,
     "--entrypoint",
     "/bin/sh",
-    "paseo-workspace:dev",
+    process.env.UPSTREAM_TEST_IMAGE ?? "paseo-workspace:dev",
     "-c",
     ": > /home/paseo/.paseo/paseo.pid",
   );

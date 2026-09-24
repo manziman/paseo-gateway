@@ -28,8 +28,24 @@ and backup of Secrets, custom resources and workspace volumes outside this
 application. Retained PVCs are private per workspace but ReadWriteOnce is not
 node-failure fencing. See [recovery constraints](docs/operations.md).
 
-For a vulnerability, use GitHub's private vulnerability reporting if enabled on
-this repository; otherwise contact `@manziman` privately before disclosing it.
+For a vulnerability, use [GitHub private vulnerability
+reporting](https://github.com/manziman/paseo-gateway/security/advisories/new).
 Never post credentials, private code, prompt contents, or an active exploit
 against someone else's installation in a public issue. Only the pinned experimental
-configuration is under active development; no security support SLA is offered.
+configuration and the latest published experimental release are under active
+development. Earlier releases receive no promised security backports, and no
+security response SLA is offered. Check the release notes for each version's
+tested support envelope before deployment.
+
+Pull requests run CodeQL on JavaScript/TypeScript and GitHub Actions workflows,
+dependency review, and the existing production npm audit. Dependency review
+blocks newly introduced high or critical advisories in runtime, development,
+and unknown scopes. A reviewed exception must name the specific GHSA, affected
+package/version, reason, owner, and expiry in a PR; avoid broad allowlists.
+CodeQL analysis failures block merging when its named checks are required.
+Repository code-scanning merge protection blocks newly introduced high or
+critical security alerts. A successful analyzer run alone does not mean it
+found no alerts; review lower-severity findings and documented false positives.
+The container scan policy and image SBOMs are documented with the release
+pipeline. See [redistribution inventory](docs/redistribution.md) for the
+separate license and vendor-terms review.

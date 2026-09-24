@@ -3,7 +3,15 @@ name: paseo-kubernetes
 description: Independent community gateway for Paseo on Kubernetes; not affiliated with or endorsed by Paseo (experimental POC)
 type: application
 version: 0.1.0
-appVersion: 0.1.0-poc.1
+appVersion: "0.1.0-poc.1"
+kubeVersion: ">=1.32.0-0 <1.36.0-0"
 home: https://github.com/manziman/paseo-gateway
 sources:
   - https://github.com/manziman/paseo-gateway
+keywords:
+  - paseo
+  - kubernetes
+  - workspace
+annotations:
+  artifacthub.io/license: Apache-2.0
+  paseo-gateway.manziman.github.io/upstream-compatibility: "0.9.1"

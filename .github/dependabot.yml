@@ -3,15 +3,24 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule: {interval: weekly}
+    commit-message:
+      prefix: "fix(deps)"
+      prefix-development: "ci(deps-dev)"
     groups:
       paseo:
         patterns: ["@getpaseo/*"]
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: weekly}
+    commit-message:
+      prefix: "ci(deps)"
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}
+    commit-message:
+      prefix: "fix(image)"
   - package-ecosystem: docker
     directory: /docker
     schedule: {interval: weekly}
+    commit-message:
+      prefix: "fix(image)"

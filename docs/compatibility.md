@@ -141,7 +141,8 @@ archived with their PVCs retained.
   fencing are validated there.
 
 The full [v0.1 specification](../paseo-kubernetes-high-level-spec.md) remains the
-release bar. Passing the POC's automated checks is not full v0.1 acceptance.
+full-parity acceptance bar. An explicitly experimental public alpha follows the
+[release policy](release-policy.md); artifact publication is not full v0.1 acceptance.
 
 ## Related follow-up issues
 

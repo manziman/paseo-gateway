@@ -16,7 +16,15 @@ limitations, and the remaining live checks.
 Existing POC installations: read the [API-group transition](docs/operations.md#api-group-transition)
 before upgrading.
 
-## Local setup
+## Public installation
+
+Versioned alpha releases provide public container images and an OCI Helm chart.
+Use the [installation and upgrade guide](docs/public-installation.md) without a
+source checkout or image build. Check the [release policy](docs/release-policy.md)
+and [published release record](https://github.com/manziman/paseo-gateway/releases)
+for the exact version, digests and qualification status.
+
+## Local development setup
 
 Prerequisites: Node 24 (`nvm use`), npm, Docker Desktop with Kubernetes and the **containerd image store** enabled,
 kubectl, Helm 3 or 4, and a Claude subscription. Local commands explicitly use the
