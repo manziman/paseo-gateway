@@ -34,6 +34,7 @@
         "required_status_checks": [
           { "context": "check", "integration_id": 15368 },
           { "context": "upstream", "integration_id": 15368 },
+          { "context": "upstream-arm64", "integration_id": 15368 },
           { "context": "Chart acceptance", "integration_id": 15368 },
           { "context": "validate", "integration_id": 15368 },
           { "context": "review", "integration_id": 15368 },

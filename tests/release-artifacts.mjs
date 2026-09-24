@@ -227,7 +227,7 @@ for (const name of ["gateway", "workspace"]) {
       }
     }
     const upstream = calls.filter(({ binary }) => binary === "npm");
-    assert.equal(upstream.length, name === "workspace" ? 2 : 0);
+    assert.equal(upstream.length, name === "workspace" ? 1 : 0);
     for (const call of upstream) {
       assert.deepEqual(call.args, ["run", "test:upstream"]);
       assert.deepEqual(call.env, {
@@ -239,7 +239,7 @@ for (const name of ["gateway", "workspace"]) {
     if (name === "workspace")
       assert.deepEqual(
         upstream.map((call) => call.env.DOCKER_DEFAULT_PLATFORM),
-        [...expected.keys()],
+        ["linux/amd64"],
       );
     const inspections = calls.filter(({ args }) => args.includes("inspect"));
     assert.deepEqual(

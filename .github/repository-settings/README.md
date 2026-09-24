@@ -11,7 +11,8 @@ python3 scripts/repository-settings.py --apply
 
 The script updates only matching named rulesets and verifies the saved policy.
 Check names must match actual check-run contexts, associated with the GitHub
-Actions integration. `main` and `alpha` require PRs with all checks passing,
+Actions integration. `upstream` covers native AMD64 and `upstream-arm64` covers
+native ARM64 daemon contracts; require both. `main` and `alpha` require PRs with all checks passing,
 resolved review threads and a linear squash history. There are no normal bypass
 actors. Zero required approvals permits the single maintainer to merge their own
 PR after validation; CODEOWNERS still supplies review routing. Tag rules permit

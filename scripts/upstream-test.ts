@@ -6,6 +6,7 @@ import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { PaseoBackend } from "../src/gateway/backend.js";
 import { startGateway } from "../src/gateway/server.js";
 import { MemoryStore, workspace } from "../tests/fixtures.js";
+import { reportUpstreamFailure } from "./upstream-diagnostics.js";
 
 // This contract test owns every container/volume it creates. It never touches a running user daemon.
 const prefix = `paseo-contract-${randomUUID().slice(0, 8)}`;
@@ -62,6 +63,7 @@ async function startDaemon(id: string) {
   );
   const port = Number(bindings[0].HostPort);
   ports.set(id, port);
+  let lastProbeError: unknown;
   for (let attempt = 0; attempt < 60; attempt++) {
     const probe = new DaemonClient({
       url: `ws://127.0.0.1:${port}/ws`,
@@ -75,12 +77,14 @@ async function startDaemon(id: string) {
       await probe.connect();
       await probe.close();
       return;
-    } catch {
+    } catch (error) {
+      lastProbeError = error;
       await probe.close();
       await delay(1000);
     }
   }
-  throw new Error("Upstream daemon did not start");
+  reportUpstreamFailure(name, password, lastProbeError);
+  throw new Error(`Upstream daemon did not start: ${id}`);
 }
 
 const store = new MemoryStore();

@@ -22,13 +22,16 @@ jobs:
     uses: ./.github/workflows/chart.yaml
   publish:
     needs: [validate, chart]
+    outputs:
+      version: ${{ steps.subjects.outputs.version }}
+      gateway: ${{ steps.subjects.outputs.gateway }}
+      workspace: ${{ steps.subjects.outputs.workspace }}
+      checksums: ${{ steps.subjects.outputs.checksums }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
       contents: write
       packages: write
-      id-token: write
-      attestations: write
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,32 +83,77 @@ jobs:
         run: |
           if test -f release-assets/artifacts.json; then
             jq -r '"version=" + .version, "gateway=" + .images.gateway.digest, "workspace=" + .images.workspace.digest' release-assets/artifacts.json >> "$GITHUB_OUTPUT"
+            printf 'checksums=%s\n' "$(sha256sum release-assets/SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           fi
+      - name: Preserve candidate evidence, including failed partial publication
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence-${{ github.run_id }}-${{ github.run_attempt }}-staging
+          path: release-assets/
+          if-no-files-found: ignore
+          retention-days: 30
+  native-arm:
+    name: Native ARM64 verification and attestations
+    needs: [publish]
+    if: needs.publish.outputs.version != ''
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_VERSION: ${{ needs.publish.outputs.version }}
+      GATEWAY_DIGEST: ${{ needs.publish.outputs.gateway }}
+      WORKSPACE_DIGEST: ${{ needs.publish.outputs.workspace }}
+      CHECKSUMS_DIGEST: ${{ needs.publish.outputs.checksums }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: npm ci
+      - name: Download and verify the staged qualification draft
+        run: |
+          test "$(gh release view "v${RELEASE_VERSION}" --json isDraft --jq .isDraft)" = true
+          gh release download "v${RELEASE_VERSION}" --dir release-assets
+          printf '%s  release-assets/SHA256SUMS\n' "$CHECKSUMS_DIGEST" | sha256sum --check
+          (cd release-assets && sha256sum --check SHA256SUMS)
+      - name: Verify immutable candidate on native ARM64
+        run: node scripts/release-native-arm.mjs "$RELEASE_VERSION" "$GATEWAY_DIGEST" "$WORKSPACE_DIGEST"
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         id: gateway-attestation
-        if: steps.subjects.outputs.version != ''
         with:
           subject-name: ghcr.io/manziman/paseo-gateway
-          subject-digest: ${{ steps.subjects.outputs.gateway }}
+          subject-digest: ${{ needs.publish.outputs.gateway }}
           push-to-registry: true
           create-storage-record: false
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         id: workspace-attestation
-        if: steps.subjects.outputs.version != ''
         with:
           subject-name: ghcr.io/manziman/paseo-workspace
-          subject-digest: ${{ steps.subjects.outputs.workspace }}
+          subject-digest: ${{ needs.publish.outputs.workspace }}
           push-to-registry: true
           create-storage-record: false
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         id: chart-attestation
-        if: steps.subjects.outputs.version != ''
         with:
-          subject-path: release-assets/*.tgz
+          subject-path: release-assets/paseo-kubernetes-${{ needs.publish.outputs.version }}.tgz
       - name: Attach signed evidence to the qualification draft
-        if: steps.subjects.outputs.version != ''
         env:
-          RELEASE_VERSION: ${{ steps.subjects.outputs.version }}
+          RELEASE_VERSION: ${{ needs.publish.outputs.version }}
           GATEWAY_BUNDLE: ${{ steps.gateway-attestation.outputs.bundle-path }}
           WORKSPACE_BUNDLE: ${{ steps.workspace-attestation.outputs.bundle-path }}
           CHART_BUNDLE: ${{ steps.chart-attestation.outputs.bundle-path }}
@@ -115,8 +163,8 @@ jobs:
           cp "$WORKSPACE_BUNDLE" release-assets/workspace-attestation.jsonl
           cp "$CHART_BUNDLE" release-assets/chart-attestation.jsonl
           node --input-type=module -e 'import {writeChecksums} from "./scripts/release-artifacts.mjs"; writeChecksums("release-assets")'
-          gh release upload "v${RELEASE_VERSION}" release-assets/*-attestation.jsonl release-assets/SHA256SUMS --clobber
-      - name: Preserve candidate evidence, including failed partial publication
+          gh release upload "v${RELEASE_VERSION}" release-assets/*-attestation.jsonl release-assets/native-arm64-verification.json release-assets/SHA256SUMS --clobber
+      - name: Preserve native verification and signing evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
