@@ -32,6 +32,7 @@ jobs:
       - run: helm lint charts/paseo && helm template paseo charts/paseo --namespace paseo-system --include-crds > /tmp/paseo.yaml
       - run: npm audit --omit=dev --audit-level=high
       - run: docker build --tag paseo-gateway:ci .
+      - run: node scripts/codex-auth-contract.mjs paseo-gateway:ci
   upstream:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -45,6 +46,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
+      - run: node scripts/codex-auth-contract.mjs paseo-workspace:dev
       - run: npm run test:upstream
   upstream-arm64:
     runs-on: ubuntu-24.04-arm
@@ -61,4 +63,5 @@ jobs:
         run: test "$(uname -m)" = aarch64
       - run: npm ci
       - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
+      - run: node scripts/codex-auth-contract.mjs paseo-workspace:dev
       - run: npm run test:upstream

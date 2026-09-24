@@ -20,6 +20,7 @@ interface ArchivedInventory {
   workspaceId: string;
   workspaceUid: string;
   capturedAt: string;
+  availability: "archived" | "suspended";
   entries: Entry[];
 }
 const kind = "agent-inventory";
@@ -27,13 +28,20 @@ const ArchivedInventorySchema = z.object({
   workspaceId: z.string(),
   workspaceUid: z.string(),
   capturedAt: z.string(),
+  availability: z.enum(["archived", "suspended"]).optional(),
   entries: z.array(z.unknown()),
 });
 
 /** Whitelist durable metadata; provider handles, arbitrary extras and permission inputs
  * may contain sensitive content and must never be copied into control ConfigMaps.
  */
-export function retainedAgentMetadata(agent: AgentSnapshotPayload, archivedAt?: string) {
+export function retainedAgentMetadata(
+  agent: AgentSnapshotPayload,
+  archivedAt?: string,
+  availability?: "archived" | "suspended" | "stale",
+  capturedAt?: string,
+) {
+  const retained = availability !== undefined || !!archivedAt;
   return AgentSnapshotPayloadSchema.parse({
     id: agent.id,
     provider: agent.provider,
@@ -45,12 +53,12 @@ export function retainedAgentMetadata(agent: AgentSnapshotPayload, archivedAt?: 
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
     lastUserMessageAt: agent.lastUserMessageAt,
-    status: archivedAt ? "closed" : agent.status,
-    activeTurn: archivedAt ? null : agent.activeTurn,
+    status: retained ? "closed" : agent.status,
+    activeTurn: retained ? null : agent.activeTurn,
     capabilities: agent.capabilities,
     currentModeId: agent.currentModeId,
     availableModes: agent.availableModes,
-    pendingPermissions: archivedAt
+    pendingPermissions: retained
       ? []
       : agent.pendingPermissions.map(({ id, provider, name, kind }) => ({
           id,
@@ -63,11 +71,13 @@ export function retainedAgentMetadata(agent: AgentSnapshotPayload, archivedAt?: 
     title: agent.title,
     labels: {
       ...agent.labels,
-      ...(archivedAt ? { "paseo-gateway.availability": "archived" } : {}),
+      ...(retained ? { "paseo-gateway.availability": availability ?? "archived" } : {}),
+      ...(capturedAt ? { "paseo-gateway.captured-at": capturedAt } : {}),
     },
     archivedAt: agent.archivedAt ?? archivedAt,
-    requiresAttention: archivedAt ? false : agent.requiresAttention,
-    attentionReason: archivedAt ? null : agent.attentionReason,
+    providerUnavailable: retained ? true : agent.providerUnavailable,
+    requiresAttention: retained ? false : agent.requiresAttention,
+    attentionReason: retained ? null : agent.attentionReason,
     attentionTimestamp: agent.attentionTimestamp,
   });
 }
@@ -80,6 +90,7 @@ export async function archiveAgentInventory(
   backend: Backend,
   workspace: Workspace,
   localId: string,
+  availability: "archived" | "suspended" = "archived",
 ) {
   const uid = workspace.metadata.uid;
   if (!uid) throw new Error("Workspace UID is required for inventory retention");
@@ -101,7 +112,12 @@ export async function archiveAgentInventory(
       const agent = AgentSnapshotPayloadSchema.parse(translated.agent);
       entries.push({
         project: { ...entry.project, projectKey: workspace.spec.projectRef },
-        agent: retainedAgentMetadata(agent, capturedAt),
+        agent: retainedAgentMetadata(
+          agent,
+          availability === "archived" ? capturedAt : undefined,
+          availability,
+          capturedAt,
+        ),
       });
     }
     if (Buffer.byteLength(JSON.stringify(entries)) > 600000)
@@ -120,7 +136,13 @@ export async function archiveAgentInventory(
     kind,
     id: uid,
     version: previous?.version,
-    value: { workspaceId: workspace.metadata.name, workspaceUid: uid, capturedAt, entries },
+    value: {
+      workspaceId: workspace.metadata.name,
+      workspaceUid: uid,
+      capturedAt,
+      availability,
+      entries,
+    },
   };
   if (previous) await records.updateRecord(record);
   else await records.createRecord(record);
@@ -133,6 +155,7 @@ export async function readArchivedInventory(
     SessionInboundMessage,
     { type: "fetch_agents_request" | "fetch_agent_history_request" }
   >,
+  availability?: "archived" | "suspended" | "stale",
 ) {
   if (workspace.status?.storageDeletedAt) return [];
   const record = workspace.metadata.uid
@@ -145,7 +168,7 @@ export async function readArchivedInventory(
     snapshot.data.workspaceUid !== workspace.metadata.uid
   )
     throw new Error(
-      `Archived workspace ${workspace.metadata.name} has no retained inventory; metadata unavailable, inspect the retained PVC`,
+      `Workspace ${workspace.metadata.name} has no retained inventory; metadata unavailable`,
     );
   const response = SessionOutboundMessageSchema.parse({
     type: "fetch_agents_response",
@@ -156,35 +179,50 @@ export async function readArchivedInventory(
     },
   });
   if (response.type !== "fetch_agents_response") throw new Error("Invalid archived inventory");
-  return response.payload.entries.filter(({ agent, project }) => {
-    const filter = message?.filter;
-    if (
-      filter?.labels &&
-      Object.entries(filter.labels).some(([key, value]) => agent.labels[key] !== value)
-    )
-      return false;
-    if (filter?.statuses?.length && !filter.statuses.includes(agent.status)) return false;
-    if (
-      filter?.requiresAttention !== undefined &&
-      !!agent.requiresAttention !== filter.requiresAttention
-    )
-      return false;
-    if (
-      filter?.thinkingOptionId !== undefined &&
-      agent.effectiveThinkingOptionId !== filter.thinkingOptionId
-    )
-      return false;
-    const search = message && "search" in message ? message.search?.toLowerCase() : undefined;
-    return (
-      !search ||
-      [
-        agent.title,
-        project.workspaceName,
-        project.projectName,
-        project.checkout.currentBranch,
-      ].some((value) => value?.toLowerCase().includes(search))
-    );
-  });
+  return response.payload.entries
+    .map(({ agent, project, ...rest }) => ({
+      ...rest,
+      project,
+      agent: retainedAgentMetadata(
+        agent,
+        workspace.spec.residency === "Archived"
+          ? (agent.archivedAt ?? snapshot.data.capturedAt)
+          : undefined,
+        availability ??
+          snapshot.data.availability ??
+          (workspace.spec.residency === "Archived" ? "archived" : "suspended"),
+        snapshot.data.capturedAt,
+      ),
+    }))
+    .filter(({ agent, project }) => {
+      const filter = message?.filter;
+      if (
+        filter?.labels &&
+        Object.entries(filter.labels).some(([key, value]) => agent.labels[key] !== value)
+      )
+        return false;
+      if (filter?.statuses?.length && !filter.statuses.includes(agent.status)) return false;
+      if (
+        filter?.requiresAttention !== undefined &&
+        !!agent.requiresAttention !== filter.requiresAttention
+      )
+        return false;
+      if (
+        filter?.thinkingOptionId !== undefined &&
+        agent.effectiveThinkingOptionId !== filter.thinkingOptionId
+      )
+        return false;
+      const search = message && "search" in message ? message.search?.toLowerCase() : undefined;
+      return (
+        !search ||
+        [
+          agent.title,
+          project.workspaceName,
+          project.projectName,
+          project.checkout.currentBranch,
+        ].some((value) => value?.toLowerCase().includes(search))
+      );
+    });
 }
 
 /** Run when the workspace retention deadline releases its data, using its immutable UID. */

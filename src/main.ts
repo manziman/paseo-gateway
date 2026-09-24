@@ -4,6 +4,7 @@ import { z } from "zod";
 import { WorkspaceAdmission } from "./controller/admission.js";
 import { runController, WorkspaceController } from "./controller/controller.js";
 import { WorkspaceAccess } from "./controller/workspace-access.js";
+import { CodexSubscriptionBroker } from "./credentials/codex-subscription.js";
 import { GitHubAppBroker } from "./credentials/github-app.js";
 import { deleteArchivedInventory } from "./gateway/agent-inventory.js";
 import { ScheduleService } from "./gateway/schedules.js";
@@ -40,6 +41,10 @@ async function main() {
       workspaceImage: required("WORKSPACE_IMAGE"),
       storageSize: process.env.WORKSPACE_STORAGE_SIZE ?? "5Gi",
       storageClass: process.env.WORKSPACE_STORAGE_CLASS,
+      storageAccessMode: z
+        .enum(["ReadWriteOnce", "ReadWriteOncePod"])
+        .parse(process.env.WORKSPACE_STORAGE_ACCESS_MODE ?? "ReadWriteOnce"),
+      tlsSecret: process.env.WORKSPACE_TLS_SECRET || undefined,
       backendSecret: process.env.BACKEND_SECRET_NAME ?? "paseo-backend",
       imagePullPolicy: z
         .enum(["Always", "IfNotPresent", "Never"])
@@ -49,6 +54,7 @@ async function main() {
     {
       namespaceLimit,
       access: new WorkspaceAccess(store, scopedAuth),
+      beforeSuspend: (workspace) => operations.snapshotSuspendedInventory(workspace),
       beforeArchive: (workspace) => operations.snapshotInventory(workspace),
       purgeInventory: (workspace) => deleteArchivedInventory(store, workspace),
     },
@@ -57,6 +63,7 @@ async function main() {
     store,
     namespace,
     backendPassword,
+    backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
     admission: new WorkspaceAdmission(store, namespaceLimit),
     readyTimeoutMs:
       z.coerce
@@ -69,6 +76,7 @@ async function main() {
   const schedules = new ScheduleService({
     records: store,
     store,
+    resolveAgent: (agentId, principal) => operations.resolveScheduleAgent(agentId, principal),
     dispatch: (input) => operations.dispatchSchedule(input),
     observe: (input) => operations.observeSchedule(input),
     onError: (event) => console.error(JSON.stringify({ level: "error", event })),
@@ -81,12 +89,21 @@ async function main() {
   });
   await schedules.initialize();
   const broker = new GitHubAppBroker(store);
-  await broker.reconcile(await store.credentialProfiles());
+  const codexBroker = new CodexSubscriptionBroker(store);
+  // Provider endpoints must not delay the HTTP startup probe. The serialized
+  // broker loop starts immediately below; workspaces wait for credential output.
   const gateway = await startGateway({
     store,
     namespace,
     password,
     backendPassword,
+    backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
+    tls: process.env.GATEWAY_TLS_CERT_FILE
+      ? {
+          cert: await readFile(required("GATEWAY_TLS_CERT_FILE")),
+          key: await readFile(required("GATEWAY_TLS_KEY_FILE")),
+        }
+      : undefined,
     serverId,
     scopedAuth,
     workspaceLogs: (workspace, tail) => store.workspaceLogs(workspace, tail),
@@ -95,9 +112,9 @@ async function main() {
     operations: {
       creationLifecycle: operations.creationLifecycle,
       close: (emit) => operations.close(emit),
-      handle: async (message, emit, principal) =>
+      handle: async (message, emit, principal, uploads) =>
         (await schedules.handle(message, emit, principal)) ||
-        (await operations.handle(message, emit, principal)),
+        (await operations.handle(message, emit, principal, uploads)),
     },
     host: "0.0.0.0",
     port: 8080,
@@ -124,7 +141,11 @@ async function main() {
   const scheduleLoop = periodic(() => schedules.tick(), 1000, "schedule_reconcile_failed");
   const brokerLoop = periodic(
     async () => {
-      const states = await broker.reconcile(await store.credentialProfiles());
+      const profiles = await store.credentialProfiles();
+      const states = [
+        ...(await broker.reconcile(profiles)),
+        ...(await codexBroker.reconcile(profiles)),
+      ];
       for (const state of states.filter(
         (state) => state.state === "Failed" || state.state === "Backoff",
       ))

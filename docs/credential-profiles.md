@@ -43,6 +43,12 @@ that refreshes will be synchronized. That credential lifecycle is independent of
 this profile feature. In particular, shared `.codex/auth.json` projections are rejected;
 see the explicit [subscription-authentication boundary](credential-renewal.md).
 Environment and `subPath` file updates require Pod recreation to take effect; suspend and resume the workspace after rotating these credentials.
+
+For profiles with file projections, a non-root init container first creates the
+home and configured parent directories as UID 1000, before checkout mounts the
+files. This prevents kubelet-created root-owned directories from making a fresh
+home unwritable. It mounts only workspace storage and temporary space, receives
+no credentials, and does not copy Secret contents into the PVC.
 Kubernetes documents these constraints for [Secrets](https://kubernetes.io/docs/concepts/configuration/secret/)
 and [ConfigMaps](https://kubernetes.io/docs/concepts/configuration/configmap/).
 

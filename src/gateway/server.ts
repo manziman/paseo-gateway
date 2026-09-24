@@ -1,4 +1,5 @@
-import { createServer } from "node:http";
+import { createServer, type RequestListener } from "node:http";
+import { createServer as createSecureServer } from "node:https";
 import { WSInboundMessageSchema } from "@getpaseo/protocol/messages";
 import { WebSocket, WebSocketServer } from "ws";
 import type { Workspace } from "../domain.js";
@@ -16,10 +17,13 @@ import { buildServerInfo, type ServerInfoConfig } from "./server-info.js";
 export { authorized } from "./auth.js";
 
 import { DirectoryGeneration } from "./catalog.js";
+import { DownloadHandles } from "./downloads.js";
 import { GatewaySession, type SessionOptions } from "./session.js";
+import { WorkspaceLabels } from "./workspace-labels.js";
 
 export interface ServerOptions
   extends Omit<SessionOptions, "hello" | "emit" | "emitBinary" | "disconnect" | "directory"> {
+  tls?: { cert: Buffer; key: Buffer };
   host: string;
   port: number;
   password: string;
@@ -33,7 +37,13 @@ export interface ServerOptions
 
 export async function startGateway(options: ServerOptions) {
   const runtime = gatewayRuntime(options.serverId, `${options.host}:${options.port}`);
-  buildServerInfo(options.serverId, options.advertised);
+  buildServerInfo(
+    options.serverId,
+    options.advertised,
+    { kind: "owner" },
+    !!options.operations?.creationLifecycle,
+    !!options.inventoryStore,
+  );
   if (options.scopedAuth) {
     validateScopedAuth(options.scopedAuth);
     if (
@@ -44,8 +54,19 @@ export async function startGateway(options: ServerOptions) {
   }
   const principals = new WeakMap<WebSocket, GatewayPrincipal>();
   const directory = new DirectoryGeneration();
+  const labels = options.inventoryStore
+    ? new WorkspaceLabels(options.inventoryStore, options.store, directory)
+    : undefined;
+  const downloadHandles = new DownloadHandles({
+    store: options.store,
+    namespace: options.namespace,
+    backendPassword: options.backendPassword,
+    backendSecure: options.backendSecure,
+    allowedHosts: options.allowedHosts,
+    scopedAuth: options.scopedAuth,
+  });
   const sessions = new Set<GatewaySession>();
-  const server = createServer(async (request, response) => {
+  const listener: RequestListener = async (request, response) => {
     try {
       if (request.url === "/healthz") {
         response.writeHead(200).end("ok\n");
@@ -57,13 +78,17 @@ export async function startGateway(options: ServerOptions) {
         return;
       }
       if (await handleTokenRequest(request, response, options)) return;
+      if (await downloadHandles.handle(request, response)) return;
       if (await handleDiagnostics(request, response, options)) return;
       response.writeHead(404).end();
     } catch {
       if (!response.headersSent) response.writeHead(503);
       response.end();
     }
-  });
+  };
+  const server = options.tls
+    ? createSecureServer({ ...options.tls, minVersion: "TLSv1.2" }, listener)
+    : createServer(listener);
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: 8 * 1024 * 1024,
@@ -108,6 +133,20 @@ export async function startGateway(options: ServerOptions) {
     let lease = false;
     let inflight = 0;
     const requestIds = new Set<string>();
+    let transferQueue: Promise<void> = Promise.resolve();
+    let queuedBinaryBytes = 0;
+    const enqueueTransfer = (action: () => Promise<void>, bytes = 0) => {
+      if (queuedBinaryBytes + bytes > 64 * 1024 * 1024) {
+        ws.close(1009, "Binary transfer queue full");
+        return false;
+      }
+      queuedBinaryBytes += bytes;
+      transferQueue = transferQueue.then(action, action).finally(() => {
+        queuedBinaryBytes -= bytes;
+      });
+      void transferQueue.catch(() => ws.close(1008, "Invalid binary routing"));
+      return true;
+    };
     const send = (data: string | Uint8Array) => {
       if (expired()) {
         ws.close(1008, "Credential expired or revoked");
@@ -146,17 +185,16 @@ export async function startGateway(options: ServerOptions) {
       }
       lastActivity = Date.now();
       if (binary) {
-        if (!session) {
+        const currentSession = session;
+        if (!currentSession) {
           ws.close(1008, "Hello required");
           return;
         }
-        void session
-          .binary(
-            data instanceof ArrayBuffer
-              ? new Uint8Array(data)
-              : Buffer.concat(Array.isArray(data) ? data : [data]),
-          )
-          .catch(() => ws.close(1008, "Invalid binary routing"));
+        const bytes =
+          data instanceof ArrayBuffer
+            ? new Uint8Array(data)
+            : Buffer.concat(Array.isArray(data) ? data : [data]);
+        enqueueTransfer(() => currentSession.binary(bytes), bytes.byteLength);
         return;
       }
       let raw: unknown;
@@ -182,6 +220,8 @@ export async function startGateway(options: ServerOptions) {
           ...options,
           runtime,
           directory,
+          labels,
+          downloadHandles,
           principal,
           hello: envelope,
           emit: (message) => send(JSON.stringify({ type: "session", message })),
@@ -200,6 +240,7 @@ export async function startGateway(options: ServerOptions) {
                 options.advertised,
                 principal,
                 options.operations?.creationLifecycle,
+                !!options.inventoryStore,
               ),
             },
           }),
@@ -216,6 +257,7 @@ export async function startGateway(options: ServerOptions) {
         return;
       }
       if (envelope.type !== "session") return;
+      const currentSession = session;
       const requestId =
         "requestId" in envelope.message && typeof envelope.message.requestId === "string"
           ? envelope.message.requestId
@@ -226,7 +268,21 @@ export async function startGateway(options: ServerOptions) {
       }
       inflight++;
       if (requestId) requestIds.add(requestId);
-      void session.handle(envelope.message).finally(() => {
+      const action = () => currentSession.handle(envelope.message);
+      const handled =
+        envelope.message.type === "file.upload.request"
+          ? new Promise<void>(
+              (resolve) =>
+                enqueueTransfer(async () => {
+                  try {
+                    await action();
+                  } finally {
+                    resolve();
+                  }
+                }) || resolve(),
+            )
+          : action();
+      void handled.finally(() => {
         inflight--;
         if (requestId) requestIds.delete(requestId);
       });

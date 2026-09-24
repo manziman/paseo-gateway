@@ -15,6 +15,10 @@ LABEL org.opencontainers.image.source="https://github.com/manziman/paseo-gateway
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="$RELEASE_VERSION" \
       org.opencontainers.image.revision="$RELEASE_REVISION"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global @openai/codex@0.156.1 --ignore-scripts \
+    && npm cache clean --force
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 ENV NODE_ENV=production

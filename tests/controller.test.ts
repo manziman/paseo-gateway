@@ -1,7 +1,8 @@
-import type { V1Pod } from "@kubernetes/client-node";
+import type { V1PersistentVolumeClaim, V1Pod } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 import { WorkspaceController } from "../src/controller/controller.js";
 import { desiredResources, resourceName } from "../src/controller/resources.js";
+import { API_VERSION, CredentialProfileSchema } from "../src/domain.js";
 import { MemoryStore, project, workspace } from "./fixtures.js";
 
 const config = {
@@ -33,6 +34,31 @@ describe("workspace lifecycle", () => {
     await controller.reconcile(row, store.projectRows);
     expect(store.objects.get(`PersistentVolumeClaim/${resourceName(row)}`)).toBe(pvc);
     expect(pvc?.metadata?.ownerReferences).toBeUndefined();
+  });
+  it("retains an existing RWO claim across an RWOP config switch while new claims use RWOP", async () => {
+    const store = new MemoryStore();
+    const old = workspace("old");
+    store.workspaceRows = [old];
+    await new WorkspaceController(store, config).reconcile(old, store.projectRows);
+    const oldKey = `PersistentVolumeClaim/${resourceName(old)}`;
+    const retained = store.objects.get(oldKey) as V1PersistentVolumeClaim;
+    expect(retained.spec?.accessModes).toEqual(["ReadWriteOnce"]);
+
+    const rwop = new WorkspaceController(store, {
+      ...config,
+      storageAccessMode: "ReadWriteOncePod",
+    });
+    await rwop.reconcile(old, store.projectRows);
+    expect(store.objects.get(oldKey)).toBe(retained);
+    expect(retained.spec?.accessModes).toEqual(["ReadWriteOnce"]);
+
+    const fresh = workspace("fresh");
+    store.workspaceRows.push(fresh);
+    await rwop.reconcile(fresh, store.projectRows);
+    const freshClaim = store.objects.get(
+      `PersistentVolumeClaim/${resourceName(fresh)}`,
+    ) as V1PersistentVolumeClaim;
+    expect(freshClaim.spec?.accessModes).toEqual(["ReadWriteOncePod"]);
   });
   it.each(["Suspended", "Archived"] as const)(
     "%s removes compute and retains storage",
@@ -86,6 +112,53 @@ describe("workspace lifecycle", () => {
     await new WorkspaceController(store, config).reconcile(row, store.projectRows);
     expect(row.status?.phase).toBe("Failed");
     expect(store.objects.size).toBe(0);
+  });
+  it("keeps a workspace stopped when its Codex access is invalidated, while empty ConfigMap data stays valid", async () => {
+    const store = new MemoryStore();
+    const row = workspace();
+    store.workspaceRows = [row];
+    store.profileRows.set(
+      "claude-default",
+      CredentialProfileSchema.parse({
+        apiVersion: API_VERSION,
+        kind: "PaseoCredentialProfile",
+        metadata: { name: "claude-default", namespace: "test" },
+        spec: {
+          codexSubscription: {
+            authSecretRef: { name: "codex-authority", key: "auth.json" },
+            outputSecretName: "codex-access",
+          },
+          files: [
+            {
+              path: ".config/empty-feature",
+              valueFrom: { configMapKeyRef: { name: "feature-config", key: "config" } },
+            },
+          ],
+        },
+      }),
+    );
+    store.secretRows.set("codex-access", { data: { "access.json": "" } });
+    store.configMapRows.set("feature-config", { data: { config: "" } });
+    const controller = new WorkspaceController(store, config);
+    await controller.reconcile(row, store.projectRows);
+    expect(row.status?.phase).toBe("Failed");
+    expect(row.status?.message).toContain("Codex credential authority");
+    expect(store.objects.size).toBe(0);
+
+    store.secretRows.set("codex-access", {
+      data: {
+        "access.json": Buffer.from(
+          JSON.stringify({
+            accessToken: "fixture-token",
+            chatgptAccountId: "fixture",
+            chatgptPlanType: null,
+            expiresAt: "2099-01-01T00:00:00.000Z",
+          }),
+        ).toString("base64"),
+      },
+    });
+    await controller.reconcile(row, store.projectRows);
+    expect(store.objects.has(`Pod/${resourceName(row)}`)).toBe(true);
   });
   it("isolates homes and working directories without Kubernetes credentials", () => {
     const a = desiredResources(workspace("one"), project(), config);

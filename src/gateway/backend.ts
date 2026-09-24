@@ -15,6 +15,7 @@ export interface Backend {
   request(message: SessionInboundMessage): Promise<SessionOutboundMessage>;
   send(message: SessionInboundMessage): void;
   binary(data: Uint8Array): void;
+  binaryPaced?(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -22,6 +23,7 @@ export interface Backend {
 export class PaseoBackend implements Backend {
   private readonly client: DaemonClient;
   private transport?: DaemonTransport;
+  private socket?: WebSocket;
   private readonly pending = new Map<
     string,
     {
@@ -46,6 +48,7 @@ export class PaseoBackend implements Backend {
         maxPayload: 8 * 1024 * 1024,
         perMessageDeflate: false,
       });
+      this.socket = socket;
       // Expose the EventEmitter surface only; ws's browser overloads are narrower than the SDK adapter.
       return {
         get readyState() {
@@ -103,6 +106,7 @@ export class PaseoBackend implements Backend {
         });
         transport.onClose(() => {
           this.transport = undefined;
+          this.socket = undefined;
           this.rejectPending();
           this.onDisconnect();
         });
@@ -124,6 +128,16 @@ export class PaseoBackend implements Backend {
   binary(data: Uint8Array) {
     if (!this.transport) throw new Error("Workspace disconnected");
     this.transport.send(data);
+  }
+
+  async binaryPaced(data: Uint8Array) {
+    const deadline = Date.now() + 60_000;
+    while (this.socket && this.socket.bufferedAmount > 4 * 1024 * 1024) {
+      if (Date.now() >= deadline)
+        throw new Error("Workspace upload backpressure timeout; inspect before retrying");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    this.binary(data);
   }
 
   request(message: SessionInboundMessage): Promise<SessionOutboundMessage> {

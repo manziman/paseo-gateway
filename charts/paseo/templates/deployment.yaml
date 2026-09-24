@@ -47,7 +47,7 @@ spec:
             - name: GATEWAY_SIGNING_KEY_FILE
               value: /signing/password
             - name: GATEWAY_INTERNAL_URL
-              value: "ws://paseo-gateway.{{ .Release.Namespace }}.svc:8080/ws"
+              value: "{{ ternary "wss" "ws" .Values.transport.tls.enabled }}://paseo-gateway.{{ .Release.Namespace }}.svc:8080/ws"
             - name: MAX_RUNNING_WORKSPACES
               value: {{ .Values.gateway.maxRunningWorkspaces | quote }}
             - name: WORKSPACE_READY_TIMEOUT_SECONDS
@@ -66,6 +66,18 @@ spec:
               value: {{ .Values.workspace.pullPolicy | quote }}
             - name: WORKSPACE_STORAGE_CLASS
               value: {{ .Values.workspace.storageClass | quote }}
+            - name: WORKSPACE_STORAGE_ACCESS_MODE
+              value: {{ .Values.workspace.storageAccessMode | quote }}
+            {{- if .Values.transport.tls.enabled }}
+            - name: GATEWAY_TLS_CERT_FILE
+              value: /transport/tls.crt
+            - name: GATEWAY_TLS_KEY_FILE
+              value: /transport/tls.key
+            - name: NODE_EXTRA_CA_CERTS
+              value: /transport/ca.crt
+            - name: WORKSPACE_TLS_SECRET
+              value: {{ .Values.transport.tls.workspaceSecret | quote }}
+            {{- end }}
             - name: WORKSPACE_STORAGE_SIZE
               value: {{ .Values.workspace.storageSize | quote }}
             - name: GATEWAY_ALLOWED_HOSTS
@@ -81,21 +93,30 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           startupProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: http, scheme: {{ ternary "HTTPS" "HTTP" .Values.transport.tls.enabled }}}
             failureThreshold: 30
             periodSeconds: 2
           readinessProbe:
-            httpGet: {path: /readyz, port: http}
+            httpGet: {path: /readyz, port: http, scheme: {{ ternary "HTTPS" "HTTP" .Values.transport.tls.enabled }}}
             periodSeconds: 5
           livenessProbe:
-            httpGet: {path: /healthz, port: http}
+            httpGet: {path: /healthz, port: http, scheme: {{ ternary "HTTPS" "HTTP" .Values.transport.tls.enabled }}}
             periodSeconds: 10
           volumeMounts:
+            {{- if .Values.transport.tls.enabled }}
+            - {name: transport, mountPath: /transport, readOnly: true}
+            {{- end }}
             - {name: signing, mountPath: /signing, readOnly: true}
             - {name: identity, mountPath: /identity, readOnly: true}
             - {name: backend, mountPath: /backend, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
+        {{- if .Values.transport.tls.enabled }}
+        - name: transport
+          secret:
+            secretName: {{ .Values.transport.tls.gatewaySecret }}
+            defaultMode: 0440
+        {{- end }}
         - name: signing
           secret:
             secretName: {{ .Values.gateway.signingSecret }}

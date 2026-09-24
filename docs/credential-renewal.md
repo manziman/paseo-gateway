@@ -8,6 +8,8 @@ installation tokens. Configure a profile:
 
 ```yaml
 spec:
+  env: []
+  files: []
   git:
     githubApp:
       appId: 123456
@@ -70,29 +72,26 @@ a substitute for revoking an already-issued token with the provider. Invoking `/
 wrapper; use `gh` from the image's normal PATH. [Kubernetes documents Secret volume
 propagation and the lack of updates for subPath mounts](https://kubernetes.io/docs/concepts/configuration/secret/).
 
-## Codex subscription authentication: explicit boundary
+## Codex subscription authentication
 
-The supported shared automation configuration here uses API keys. Shared rotating
-ChatGPT login caches are **not supported**: profiles reject `.codex/auth.json`
-projections and `CODEX_HOME` overrides. The gateway does not extract refresh tokens,
-copy an interactive user's cache into multiple Pods, or implement an undocumented
-OAuth refresh endpoint.
+A pinned native Codex authority and access-only worker bridge are implemented;
+see the [subscription authority decision, setup and failure contract](codex-subscription-authority.md).
+The gateway invokes Codex's own managed refresh and never implements a private
+OAuth endpoint. Workers use the documented experimental external-token app-server
+mode and do not receive refresh tokens. Shared `.codex/auth.json` projections and
+`CODEX_HOME` overrides remain prohibited.
 
-Official Codex documentation says active ChatGPT logins refresh automatically and
-cache credentials in `auth.json` or the OS credential store. It also documents
-Enterprise access tokens and `codex login --with-access-token`. That is a distinct
-access-token contract, not permission to share a rotating browser-login cache.
-[Codex authentication](https://learn.chatgpt.com/docs/auth).
+Two concurrent Kubernetes workers using a dedicated login have live evidence for
+actual native renewal, updated access delivery without Pod replacement and gateway
+replacement during idle and active turns without prompt replay. Actual
+expiry/revocation, explicit credential replacement and worker Pod failure during a
+turn remain unqualified.
+API-key success is a separate case and does not close subscription parity.
+An uncertain external refresh is deliberately fenced until a new login is supplied;
+it is not silently retried. See [provider acceptance](provider-acceptance.md) for
+executed versus blocked reporting and rotation procedures.
 
-The documented advanced CI workflow refreshes an auth file in place and persists
-its updated state between jobs. That is not the same as independent concurrent
-Pods refreshing copies of one credential. No safe multi-workspace refresh broker
-contract was established in the reviewed documentation, so subscription renewal
-remains an explicit blocker. The pinned runtime's Enterprise access-token login
-flag has not been live-verified; we do not claim support for it here.
-[Non-interactive authentication](https://learn.chatgpt.com/docs/non-interactive-mode).
-
-OpenAI also documents workload identity federation with a changing identity-token
-file and in-memory access tokens. This requires administrator-managed identity
-configuration; it is a possible separate integration rather than a drop-in refresh
-of a personal ChatGPT login. [Workload identity federation](https://developers.openai.com/api/docs/guides/workload-identity-federation).
+OpenAI also documents administrator-managed access tokens and workload identity
+federation. Those are separate integrations, not substitutes for a personal
+subscription's rotating login. See [authentication](https://learn.chatgpt.com/docs/auth)
+and [workload identity federation](https://developers.openai.com/api/docs/guides/workload-identity-federation).

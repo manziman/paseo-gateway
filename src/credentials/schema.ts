@@ -186,10 +186,69 @@ export const CredentialProfileSpecSchema = z
       })
       .strict()
       .optional(),
+    codexSubscription: z
+      .object({
+        authSecretRef: KeyReferenceSchema,
+        outputSecretName: name,
+      })
+      .strict()
+      .optional(),
     runtime: RuntimeOverridesSchema.optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {
+    if (spec.codexSubscription) {
+      if (spec.codexSubscription.authSecretRef.name === spec.codexSubscription.outputSecretName)
+        ctx.addIssue({
+          code: "custom",
+          message: "Codex authority and access Secrets must differ",
+          path: ["codexSubscription"],
+        });
+      if (
+        spec.env.some((env) =>
+          [
+            "OPENAI_API_KEY",
+            "CODEX_API_KEY",
+            "CODEX_ACCESS_TOKEN",
+            "OPENAI_FEDERATION_RULE_ID",
+            "OPENAI_IDENTITY_TOKEN_FILE",
+          ].includes(env.name),
+        )
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Codex subscription authority cannot mix authentication modes",
+          path: ["env"],
+        });
+      if (spec.codexSubscription.authSecretRef.key === "paseo-access.json")
+        ctx.addIssue({
+          code: "custom",
+          message: "Authority key is reserved for broker state",
+          path: ["codexSubscription", "authSecretRef", "key"],
+        });
+      if (spec.git?.githubApp?.outputSecretName === spec.codexSubscription.outputSecretName)
+        ctx.addIssue({
+          code: "custom",
+          message: "Managed credential output Secrets must differ",
+          path: ["codexSubscription"],
+        });
+      const authority = spec.codexSubscription.authSecretRef.name;
+      if (
+        [...spec.env, ...spec.files].some(
+          (item) => item.valueFrom.secretKeyRef?.name === authority,
+        ) ||
+        spec.git?.tokenSecretRef?.name === authority ||
+        spec.git?.ssh?.keySecretRef.name === authority ||
+        spec.git?.ssh?.knownHostsRef.secretKeyRef?.name === authority ||
+        spec.git?.signing?.keySecretRef.name === authority ||
+        spec.git?.githubApp?.outputSecretName === authority
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Codex authority Secret must never be projected into workers",
+          path: ["codexSubscription"],
+        });
+    }
     if (spec.git?.tokenSecretRef && spec.git.githubApp)
       ctx.addIssue({
         code: "custom",

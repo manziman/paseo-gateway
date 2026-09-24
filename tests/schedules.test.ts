@@ -179,6 +179,38 @@ describe("durable schedules", () => {
       ),
     ).toBe("2026-11-02T07:30:00.000Z");
   });
+  it("binds an existing agent to the resolved workspace UID and dispatches without allocation", async () => {
+    const agentId = randomUUID();
+    const dispatched: unknown[] = [];
+    const f = setup({
+      resolveAgent: async (id) => {
+        expect(id).toBe(agentId);
+        return {
+          projectId: "example",
+          credentialProfile: "claude-default",
+          workspaceId: "one",
+          workspaceUid: "uid-one",
+        };
+      },
+      dispatch: async (input) => {
+        dispatched.push(input);
+        return { agentId, workspaceId: "one" };
+      },
+    });
+    const id = await f.add({ target: { type: "agent", agentId } });
+    await f.rpc({ type: "schedule/run-once", requestId: "once", scheduleId: id });
+    await f.service.close();
+    expect(dispatched).toMatchObject([
+      {
+        schedule: { target: { type: "agent", agentId } },
+        targetWorkspaceId: "one",
+        targetWorkspaceUid: "uid-one",
+      },
+    ]);
+    expect((await f.records.records("schedule-run"))[0]?.value).toMatchObject({
+      run: { agentId, workspaceId: "one" },
+    });
+  });
   it("reserves a fire durably, deduplicates concurrent ticks and Forbid then observes completion", async () => {
     const f = setup({ observe: async () => ({ status: "succeeded", output: "done" }) });
     const id = await f.add();

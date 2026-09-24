@@ -1,0 +1,35 @@
+# Copy to an operator-local file and replace placeholders. Do not commit private
+# endpoints, account/cluster names, identity material, or live values.
+image:
+  # Set an exact published candidate digest in the local copy.
+  digest: ""
+workspace:
+  # Set an exact published candidate digest in the local copy.
+  digest: ""
+  # An existing EBS CSI StorageClass with explicit encrypted: "true".
+  storageClass: encrypted-ebs
+  storageSize: 5Gi
+  # Use only for fresh qualification PVCs; existing PVC access modes are immutable.
+  storageAccessMode: ReadWriteOncePod
+transport:
+  tls:
+    enabled: true
+    gatewaySecret: paseo-gateway-tls
+    workspaceSecret: paseo-workspace-tls
+networkPolicy:
+  enabled: true
+  egress:
+    enabled: true
+    # Only the operator-approved egress proxy is reachable. Its own policy,
+    # authentication and TLS validation must be checked independently.
+    rules:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                egress.example.org/approved: "true"
+            podSelector:
+              matchLabels:
+                egress.example.org/component: proxy
+        ports:
+          - protocol: TCP
+            port: 8443

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { posix } from "node:path";
 import {
   decodeFileTransferFrame,
   decodeTerminalStreamFrame,
@@ -31,6 +32,7 @@ import {
   authorizeWorkspace,
   type GatewayPrincipal,
   principalIsActive,
+  type ScopedAuthOptions,
 } from "./auth.js";
 import { type Backend, PaseoBackend } from "./backend.js";
 import {
@@ -41,8 +43,11 @@ import {
   sortWorkspaces,
   workspaceDescriptor,
 } from "./catalog.js";
+import type { DownloadHandles } from "./downloads.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
 import type { GatewayRuntime } from "./runtime-status.js";
+import { UploadStaging } from "./uploads.js";
+import { WorkspaceLabels } from "./workspace-labels.js";
 
 const forwarded = new Set([
   "create_agent_request",
@@ -67,6 +72,7 @@ const forwarded = new Set([
   "list_commands_request",
   "file_explorer_request",
   "file.upload.request",
+  "file_download_token_request",
   "list_terminals_request",
   "subscribe_terminals_request",
   "unsubscribe_terminals_request",
@@ -100,7 +106,10 @@ const providerRequests = new Set([
 export interface SessionOptions {
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
+  labels?: WorkspaceLabels;
+  downloadHandles?: DownloadHandles;
   principal?: GatewayPrincipal;
+  scopedAuth?: ScopedAuthOptions;
   operations?: {
     creationLifecycle?: boolean;
     close?(emit: SessionOptions["emit"]): void;
@@ -108,11 +117,13 @@ export interface SessionOptions {
       message: SessionInboundMessage,
       emit: SessionOptions["emit"],
       principal: GatewayPrincipal,
+      uploads?: UploadStaging,
     ): Promise<boolean>;
   };
   store: Store;
   namespace: string;
   backendPassword: string;
+  backendSecure?: boolean;
   directory: DirectoryGeneration;
   hello: WSHelloMessage;
   emit: (message: SessionOutboundMessage | JsonObject) => void;
@@ -130,34 +141,53 @@ export interface SessionOptions {
 export class GatewaySession {
   private readonly connections = new Map<
     string,
-    Promise<{ backend: Backend; workspace: Workspace; localId: string }>
+    Promise<{ backend: Backend; workspace: Workspace; localId: string; retire: () => void }>
   >();
   private readonly slots = new TerminalSlots();
   private readonly pages = new DirectoryPages();
-  private readonly uploads = new Map<string, string>();
+  private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
   private closed = false;
   private watchingWorkspaces = false;
   private refreshing = false;
   private readonly workspaceRuntime = new Map<string, WorkspaceDescriptorPayload>();
   private readonly workspaceProjections = new Map<string, string>();
-  constructor(private readonly options: SessionOptions) {}
+  private readonly labels?: WorkspaceLabels;
+  constructor(private readonly options: SessionOptions) {
+    this.uploads = new UploadStaging((message) => options.emit(message));
+    this.labels =
+      options.labels ??
+      (options.inventoryStore
+        ? new WorkspaceLabels(options.inventoryStore, options.store, options.directory)
+        : undefined);
+  }
 
   private async connection(workspace: Workspace) {
     if (!authorizeWorkspace(this.options.principal ?? { kind: "owner" }, workspace))
       throw new Error("Workspace access denied");
     const id = workspace.metadata.name;
     const previous = this.connections.get(id);
-    if (previous) return previous;
     if (workspace.spec.residency !== "Running" || workspace.status?.phase !== "Ready") {
       throw new Error(
         `Workspace ${id} is ${workspace.status?.phase ?? "Pending"}; inventory is unavailable, not deleted`,
       );
     }
+    if (previous) {
+      const connected = await previous;
+      if (connected.workspace.metadata.uid !== workspace.metadata.uid) {
+        connected.retire();
+        await connected.backend.close();
+        this.connections.delete(id);
+        this.workspaceRuntime.delete(id);
+        throw new Error("Workspace identity changed; reconnect before acting");
+      }
+      return connected;
+    }
     const promise = (async () => {
       let localId = workspace.status?.backendWorkspaceId ?? "";
+      let retired = false;
       const onMessage = (message: SessionOutboundMessage) => {
-        if (this.closed) return;
+        if (this.closed || retired) return;
         if (message.type === "status" && message.payload.status === "server_info") return;
         if (message.type === "project.update") return;
         if (message.type === "workspace_update") {
@@ -177,6 +207,7 @@ export class GatewaySession {
         this.options.emit(translated);
       };
       const onBinary = (data: Uint8Array) => {
+        if (this.closed || retired) return;
         const terminal = decodeTerminalStreamFrame(data);
         this.options.emitBinary(
           terminal
@@ -190,7 +221,7 @@ export class GatewaySession {
       const backend =
         this.options.backendFactory?.(workspace, onMessage, onBinary, this.options.disconnect) ??
         new PaseoBackend(
-          `ws://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
+          `${this.options.backendSecure ? "wss" : "ws"}://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
           this.options.backendPassword,
           this.options.hello,
           onMessage,
@@ -220,7 +251,14 @@ export class GatewaySession {
           throw new Error("Workspace subscription failed");
         const runtime = snapshot.payload.entries.find((entry) => entry.id === localId);
         if (runtime) this.workspaceRuntime.set(id, runtime);
-        return { backend, workspace, localId };
+        return {
+          backend,
+          workspace,
+          localId,
+          retire: () => {
+            retired = true;
+          },
+        };
       } catch (error) {
         await backend.close();
         this.connections.delete(id);
@@ -238,6 +276,11 @@ export class GatewaySession {
     ]);
     const principal = this.options.principal ?? { kind: "owner" };
     if (!principalIsActive(principal, workspaces))
+      throw new Error("Workspace credential expired or revoked");
+    if (
+      principal.kind === "workspace" &&
+      this.options.scopedAuth?.revokedTokenIds?.has(principal.tokenId)
+    )
       throw new Error("Workspace credential expired or revoked");
     return {
       projects: projects.filter(
@@ -282,11 +325,16 @@ export class GatewaySession {
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : "";
     const { projects, workspaces } = await this.records();
+    if (message.type === "file.upload.request") {
+      this.uploads.begin(message);
+      return;
+    }
     if (
       await this.options.operations?.handle(
         message,
         this.options.emit,
         this.options.principal ?? { kind: "owner" },
+        this.uploads,
       )
     )
       return;
@@ -390,21 +438,28 @@ export class GatewaySession {
         });
         return;
       }
-      await Promise.all(
+      await Promise.allSettled(
         active
           .filter((w) => w.spec.residency === "Running" && w.status?.phase === "Ready")
           .map((w) => this.connection(w)),
       );
-      let rows = active
-        .filter((w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId)
-        .map((w) => ({
-          ...workspaceDescriptor(
-            w,
-            this.projectFor(w, projects),
-            this.workspaceRuntime.get(w.metadata.name),
-          ),
-          syncSeq: this.options.directory.next(),
-        }));
+      let rows = await Promise.all(
+        active
+          .filter(
+            (w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId,
+          )
+          .map(async (w) => ({
+            ...workspaceDescriptor(
+              w,
+              this.projectFor(w, projects),
+              w.spec.residency === "Running" && w.status?.phase === "Ready"
+                ? this.workspaceRuntime.get(w.metadata.name)
+                : undefined,
+            ),
+            labels: (await this.labels?.workspaceLabels(w)) ?? [],
+            syncSeq: this.options.directory.next(),
+          })),
+      );
       if (message.filter?.query) {
         const q = message.filter.query.toLowerCase();
         rows = rows.filter(
@@ -536,43 +591,57 @@ export class GatewaySession {
           );
           continue;
         }
-        // A freshly allocated CR has never hosted a daemon or agent. Once reconciled,
-        // any unavailable inventory is reported explicitly, including recovery failures.
         if (!workspace.status) continue;
-        const connection = await this.connection(workspace);
-        const filter = message.filter
-          ? object(translate(message.filter, workspace, connection.localId, "in"))
-          : undefined;
-        if (filter) delete filter.projectKeys;
-        let cursor: string | undefined;
-        do {
-          const request = SessionInboundMessageSchema.parse({
-            ...message,
-            requestId: randomUUID(),
-            filter,
-            sync: undefined,
-            page: { limit: 200, ...(cursor ? { cursor } : {}) },
-          });
-          const reply = await connection.backend.request(request);
-          if (
-            reply.type !== "fetch_agents_response" &&
-            reply.type !== "fetch_agent_history_response"
-          )
-            throw new Error("Unexpected agent inventory response");
-          entries.push(
-            ...reply.payload.entries.map((entry) => {
-              const translated = object(translate(entry, workspace, connection.localId, "out"));
-              return {
-                ...translated,
-                agent: AgentSnapshotPayloadSchema.parse(translated.agent),
-                syncSeq: this.options.directory.next(),
-              };
-            }),
-          );
-          cursor = reply.payload.pageInfo.hasMore
-            ? (reply.payload.pageInfo.nextCursor ?? undefined)
+        const start = entries.length;
+        try {
+          if (workspace.spec.residency !== "Running" || workspace.status.phase !== "Ready")
+            throw new Error("Workspace backend unavailable");
+          const connection = await this.connection(workspace);
+          const filter = message.filter
+            ? object(translate(message.filter, workspace, connection.localId, "in"))
             : undefined;
-        } while (cursor);
+          if (filter) delete filter.projectKeys;
+          let cursor: string | undefined;
+          do {
+            const request = SessionInboundMessageSchema.parse({
+              ...message,
+              requestId: randomUUID(),
+              filter,
+              sync: undefined,
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            const reply = await connection.backend.request(request);
+            if (
+              reply.type !== "fetch_agents_response" &&
+              reply.type !== "fetch_agent_history_response"
+            )
+              throw new Error("Unexpected agent inventory response");
+            entries.push(
+              ...reply.payload.entries.map((entry) => {
+                const translated = object(translate(entry, workspace, connection.localId, "out"));
+                return {
+                  ...translated,
+                  agent: AgentSnapshotPayloadSchema.parse(translated.agent),
+                  syncSeq: this.options.directory.next(),
+                };
+              }),
+            );
+            cursor = reply.payload.pageInfo.hasMore
+              ? (reply.payload.pageInfo.nextCursor ?? undefined)
+              : undefined;
+          } while (cursor);
+        } catch (error) {
+          entries.splice(start);
+          if (!this.options.inventoryStore) throw error;
+          entries.push(
+            ...(await readArchivedInventory(
+              this.options.inventoryStore,
+              workspace,
+              message,
+              workspace.spec.residency === "Suspended" ? "suspended" : "stale",
+            )),
+          );
+        }
       }
       sortAgents(entries, message.sort);
       this.options.emit({
@@ -605,13 +674,14 @@ export class GatewaySession {
       });
       return;
     }
-    if (message.type === "workspace.label.list.request") {
-      this.options.emit({
-        type: "workspace.label.list.response",
-        payload: { requestId, labels: [], sync: this.options.directory.snapshot() },
-      });
+    if (
+      await this.labels?.handle(
+        message,
+        this.options.principal ?? { kind: "owner" },
+        this.options.emit,
+      )
+    )
       return;
-    }
     if (message.type === "agent.timeline.set_subscription.request") {
       const grouped = new Map<string, string[]>();
       for (const id of message.agentIds) {
@@ -640,10 +710,19 @@ export class GatewaySession {
     if (message.type === "fetch_agent_request" && message.agentId.includes("~")) {
       const route = parseScopedId(message.agentId);
       const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
-      if (workspace?.spec.residency === "Archived" && this.options.inventoryStore) {
-        const entry = (await readArchivedInventory(this.options.inventoryStore, workspace)).find(
-          (row) => row.agent.id === message.agentId,
-        );
+      if (
+        workspace &&
+        this.options.inventoryStore &&
+        (workspace.spec.residency !== "Running" || workspace.status?.phase !== "Ready")
+      ) {
+        const entry = (
+          await readArchivedInventory(
+            this.options.inventoryStore,
+            workspace,
+            undefined,
+            workspace.spec.residency === "Archived" ? "archived" : "suspended",
+          )
+        ).find((row) => row.agent.id === message.agentId);
         this.options.emit({
           type: "fetch_agent_response",
           payload: { requestId, agent: entry?.agent ?? null, project: entry?.project, error: null },
@@ -659,8 +738,13 @@ export class GatewaySession {
       const query = record.agentId;
       const matches: Extract<SessionOutboundMessage, { type: "fetch_agent_response" }>[] = [];
       for (const workspace of workspaces) {
-        if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
-          for (const entry of await readArchivedInventory(this.options.inventoryStore, workspace)) {
+        if (workspace.spec.residency !== "Running" && this.options.inventoryStore) {
+          for (const entry of await readArchivedInventory(
+            this.options.inventoryStore,
+            workspace,
+            undefined,
+            workspace.spec.residency === "Archived" ? "archived" : "suspended",
+          )) {
             const id = parseScopedId(entry.agent.id).backendId;
             if (id.startsWith(query) || entry.agent.title?.toLowerCase() === query.toLowerCase())
               matches.push({
@@ -715,16 +799,17 @@ export class GatewaySession {
           ? selectWorkspace(record, active)
           : active.find((w) => w.status?.phase === "Ready");
       if (!workspace) {
-        if (
-          message.type === "get_providers_snapshot_request" ||
-          message.type === "refresh_providers_snapshot_request"
-        ) {
+        if (message.type === "get_providers_snapshot_request") {
           this.options.emit({
-            type:
-              message.type === "get_providers_snapshot_request"
-                ? "get_providers_snapshot_response"
-                : "refresh_providers_snapshot_response",
+            type: "get_providers_snapshot_response",
             payload: { requestId, entries: [], generatedAt: new Date().toISOString() },
+          });
+          return;
+        }
+        if (message.type === "refresh_providers_snapshot_request") {
+          this.options.emit({
+            type: "refresh_providers_snapshot_response",
+            payload: { requestId, acknowledged: true },
           });
           return;
         }
@@ -753,13 +838,34 @@ export class GatewaySession {
   }
 
   private async forward(message: SessionInboundMessage, workspace: Workspace) {
+    const validate = async () => {
+      const { workspaces } = await this.records();
+      const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
+      if (
+        !current ||
+        current.metadata.uid !== workspace.metadata.uid ||
+        current.metadata.deletionTimestamp ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready"
+      )
+        throw new Error("Workspace is stopped or replaced; reconnect before acting");
+    };
+    await validate();
     const connection = await this.connection(workspace);
-    const input = SessionInboundMessageSchema.parse(
+    if (message.type === "file_download_token_request") {
+      const root = workspacePath(workspace.metadata.name);
+      const path = posix.normalize(message.path);
+      if (!posix.isAbsolute(message.path) || (path !== root && !path.startsWith(`${root}/`)))
+        throw new Error("Download path is outside the selected workspace");
+      if (!this.options.downloadHandles) throw new Error("Gateway download routing is unavailable");
+    }
+    let input = SessionInboundMessageSchema.parse(
       translate(message, workspace, connection.localId, "in"),
     );
+    if (input.type === "send_agent_message_request")
+      input = await this.uploads.replace(input, connection.backend, validate);
+    await validate();
     const record = object(message);
-    if (message.type === "file.upload.request" && typeof record.requestId === "string")
-      this.uploads.set(record.requestId, workspace.metadata.name);
     if (typeof record.subscriptionId === "string")
       this.subscriptions.set(record.subscriptionId, workspace.metadata.name);
     if (
@@ -778,6 +884,18 @@ export class GatewaySession {
     }
     const reply = await connection.backend.request(input);
     const result = object(translate(reply, workspace, connection.localId, "out"));
+    if (reply.type === "file_download_token_response" && reply.payload.token) {
+      const handles = this.options.downloadHandles;
+      if (!handles) throw new Error("Gateway download routing is unavailable");
+      object(result.payload).token = handles.issue({
+        workspace,
+        principal: this.options.principal ?? { kind: "owner" },
+        backendToken: reply.payload.token,
+        mimeType: reply.payload.mimeType,
+        fileName: reply.payload.fileName,
+        size: reply.payload.size,
+      });
+    }
     if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
       object(result.payload).slot = this.slots.outward(workspace.metadata.name, reply.payload.slot);
     }
@@ -785,39 +903,65 @@ export class GatewaySession {
   }
 
   async binary(data: Uint8Array) {
-    await this.records();
+    const { workspaces } = await this.records();
     const terminal = decodeTerminalStreamFrame(data);
     if (terminal) {
       const route = this.slots.inward(terminal.slot);
       const connection = await this.connections.get(route.workspaceId);
       if (!connection) throw new Error("Terminal workspace is disconnected");
+      const current = workspaces.find((row) => row.metadata.name === route.workspaceId);
+      if (
+        !current ||
+        current.metadata.uid !== connection.workspace.metadata.uid ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready"
+      )
+        throw new Error("Terminal workspace is stopped or replaced");
       connection.backend.binary(
         encodeTerminalStreamFrame({ ...terminal, slot: route.backendSlot }),
       );
       return;
     }
     const file = decodeFileTransferFrame(data);
-    const route = file && this.uploads.get(file.requestId);
-    const connection = route ? await this.connections.get(route) : undefined;
-    if (!connection) throw new Error("Unknown binary transfer");
-    connection.backend.binary(data);
-    if (file?.opcode === 0x12) this.uploads.delete(file.requestId);
+    if (file && this.uploads.binary(data)) return;
+    throw new Error("Unknown binary transfer");
   }
 
   async refreshDirectory() {
-    if (this.closed || this.refreshing || !this.watchingWorkspaces) return;
+    if (this.closed || this.refreshing) return;
     this.refreshing = true;
     try {
       const { workspaces, projects } = await this.records();
       const active = workspaces.filter((w) => w.spec.residency !== "Archived");
+      for (const [id, entry] of this.connections) {
+        const connected = await entry.catch(() => undefined);
+        const current = active.find((workspace) => workspace.metadata.name === id);
+        if (
+          !current ||
+          !connected ||
+          current.spec.residency !== "Running" ||
+          current.status?.phase !== "Ready" ||
+          connected.workspace.metadata.uid !== current.metadata.uid
+        ) {
+          this.connections.delete(id);
+          this.workspaceRuntime.delete(id);
+          if (!connected) continue;
+          connected.retire();
+          await connected.backend.close();
+        }
+      }
+      if (!this.watchingWorkspaces) return;
       for (const workspace of active) {
         if (workspace.spec.residency === "Running" && workspace.status?.phase === "Ready")
           await this.connection(workspace);
         const descriptor = workspaceDescriptor(
           workspace,
           this.projectFor(workspace, projects),
-          this.workspaceRuntime.get(workspace.metadata.name),
+          workspace.spec.residency === "Running" && workspace.status?.phase === "Ready"
+            ? this.workspaceRuntime.get(workspace.metadata.name)
+            : undefined,
         );
+        descriptor.labels = (await this.labels?.workspaceLabels(workspace)) ?? [];
         const serialized = JSON.stringify(descriptor);
         if (this.workspaceProjections.get(workspace.metadata.name) === serialized) continue;
         this.workspaceProjections.set(workspace.metadata.name, serialized);
@@ -847,6 +991,15 @@ export class GatewaySession {
               },
             });
         }
+    } catch (error) {
+      const connected = await Promise.allSettled([...this.connections.values()]);
+      this.connections.clear();
+      for (const result of connected)
+        if (result.status === "fulfilled") {
+          result.value.retire();
+          await result.value.backend.close().catch(() => {});
+        }
+      throw error;
     } finally {
       this.refreshing = false;
     }
@@ -854,9 +1007,14 @@ export class GatewaySession {
 
   async close() {
     this.closed = true;
+    this.labels?.releaseEmitter(this.options.emit);
     this.options.operations?.close?.(this.options.emit);
     await Promise.allSettled(
-      [...this.connections.values()].map(async (entry) => (await entry).backend.close()),
+      [...this.connections.values()].map(async (entry) => {
+        const connection = await entry;
+        connection.retire();
+        await connection.backend.close();
+      }),
     );
     this.connections.clear();
     this.workspaceRuntime.clear();

@@ -20,6 +20,7 @@ export class WorkspaceController {
       namespaceLimit?: number;
       now?: () => number;
       access?: { ensure(workspace: Workspace): Promise<void> };
+      beforeSuspend?: (workspace: Workspace) => Promise<void>;
       beforeArchive?: (workspace: Workspace) => Promise<void>;
       purgeInventory?: (workspace: Workspace) => Promise<void>;
     } = {},
@@ -129,6 +130,26 @@ export class WorkspaceController {
       });
       return true;
     }
+    if (
+      workspace.spec.residency === "Suspended" &&
+      pod?.metadata?.uid &&
+      !pod.metadata.deletionTimestamp &&
+      pod.status?.conditions?.some(
+        (condition) => condition.type === "Ready" && condition.status === "True",
+      ) &&
+      this.options.beforeSuspend
+    ) {
+      try {
+        await this.options.beforeSuspend(workspace);
+      } catch {
+        await this.report(
+          workspace,
+          "Failed",
+          "Inventory snapshot unavailable; compute and storage retained before suspension",
+        );
+        return true;
+      }
+    }
     if (pod?.metadata?.uid && !pod.metadata.deletionTimestamp)
       await this.store.deletePod(name, pod.metadata.uid);
     if (pod) {
@@ -226,6 +247,19 @@ export class WorkspaceController {
               workspace,
               "Failed",
               "Credential profile reference has a missing key",
+            );
+            return;
+          }
+          if (
+            reference.kind === "Secret" &&
+            reference.name === profile.spec.codexSubscription?.outputSecretName &&
+            reference.key === "access.json" &&
+            !object.data?.[reference.key]
+          ) {
+            await this.report(
+              workspace,
+              "Failed",
+              "Codex credential authority has no usable access credential",
             );
             return;
           }
