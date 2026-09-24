@@ -1,0 +1,28 @@
+Agent Sandbox v1.0.3 compatibility spike — 2026-09-24
+Baseline gateway: 62a7c6b
+Upstream source: 527d9346fe1d237dea5c003f3c720531c7bab1df
+Cluster: docker-desktop; namespace: paseo-sandbox-spike
+Both live commands exited 0. Negative probes PASS when the incompatibility is reproduced.
+
+PASS existing private SSH checkout, credential projection, image and pod security on Sandbox-created pod
+PASS Paseo 0.9.1 authenticated SDK provider catalog and terminal creation through retained Service
+PASS whole-volume scoped access Secret updates in place without pod restart
+PASS suspend stops compute without recreation and preserves PVC UID
+PASS resume preserves home contents, Service IP and authenticated Paseo connectivity
+PASS upstream recreates deleted retained pod with unchanged disk contents
+PASS nonzero teardown hook refuses archive; Sandbox, compute and storage retained
+PASS successful teardown precedes compute/Sandbox cleanup and retains external PVC
+PASS PaseoWorkspace deletion still retains external PVC
+PASS existing adapter rejects ephemeral suspension without destroying emptyDir
+PASS ephemeral archive runs teardown and removes Sandbox/Pod without PVC
+PASS adapter archive TTL waits for actual PVC disappearance behind finalizer
+PASS REGRESSION REPRODUCED: SandboxExpired is reported while finalizer-held Pod still exists
+PASS REGRESSION REPRODUCED: native volumeClaimTemplates PVC is deleted with Sandbox
+PASS REGRESSION REPRODUCED: native deadline deletes compute despite failed Paseo teardown
+REPRODUCED early suspend: Workspace reports Suspended while queued Sandbox remains Running
+REPRODUCED adapter ownership gap: a same-name Sandbox with a different workspace UID is resumed
+REPRODUCED capacity regression: two Pods start with namespaceLimit=1; one belongs to reported-Suspended workspace
+REPRODUCED stale template: resume ignores changed project memory request and reuses original PodSpec
+
+Repository check: TypeScript, Biome, 153 tests passed / 2 executable CLI cases skipped, build passed.
+See docs/agent-sandbox-spike.md for coverage limitations and adoption gates.
