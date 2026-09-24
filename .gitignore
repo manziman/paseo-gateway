@@ -8,3 +8,5 @@ coverage/
 *.log
 *.tgz
 .DS_Store
+__pycache__/
+release-assets/
