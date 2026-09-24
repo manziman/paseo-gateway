@@ -12,7 +12,9 @@ manual review. See [the inventory procedure](docs/redistribution.md).
 | Claude Code CLI, official unmodified npm package (workspace) | 2.1.274 | Anthropic proprietary terms; [license and product preinstallation conditions](https://code.claude.com/docs/en/legal-and-compliance). Its package includes `LICENSE.md` pointing to those terms. Claude Code is not under the gateway's Apache-2.0 license. |
 | Codex CLI, official npm package (workspace) | 0.156.1 | Apache-2.0 in its package metadata and [versioned source license](https://github.com/openai/codex/blob/rust-v0.156.1/LICENSE). OpenAI's [self-hosted environment guidance](https://developers.openai.com/api/docs/guides/agents-api/environments/self-hosted) shows installing the CLI in a container; each operator supplies their own credentials. Codex is not endorsed by or affiliated with this project. |
 | OpenCode CLI, official npm package (workspace) | 1.18.32 | MIT in package metadata; its full license text is included at `/usr/local/lib/node_modules/opencode-ai/LICENSE` in the inspected image. OpenCode is not endorsed by or affiliated with this project. |
-| Node.js and npm (both images); Corepack and Yarn (workspace) | Image-specific | Retain their license files within their installed paths, including `/usr/local/LICENSE`, `/usr/local/lib/node_modules/npm/LICENSE`, and `/opt/yarn-v1.22.22/LICENSE` where present. |
+| Node.js (both images); npm 12.1.0, Corepack and Yarn (workspace) | Image-specific | Retain their license files within their installed paths, including `/usr/local/LICENSE`, `/usr/local/lib/node_modules/npm/LICENSE`, and `/opt/yarn-v1.22.22/LICENSE` where present. The gateway runtime omits npm. |
+| esbuild (workspace, Paseo plugin runtime) | 0.25.12 | MIT. Its upstream 0.25.12 source is [available here](https://github.com/evanw/esbuild/tree/v0.25.12); this image replaces only the bundled Paseo platform executable with the same source rebuilt using Go 1.27.1 to address Go runtime vulnerabilities. The JavaScript API remains 0.25.12. |
+| linkify-it and uc.micro (workspace, Paseo Markdown rendering) | 5.0.2 and 2.1.0 | MIT; [linkify-it source](https://github.com/markdown-it/linkify-it/tree/5.0.2) and [uc.micro source](https://github.com/markdown-it/uc.micro/tree/2.1.0). The image updates Paseo's vulnerable transitive linkify-it 2.2.0 and nests uc.micro 2.1.0 for it; Markdown-it keeps its own uc.micro 1.x. |
 | Debian packages, including `gh` and OpenSSH in the workspace | Image-specific | Each package retains its own copyright/license declaration under `/usr/share/doc/<package>/copyright`, as [Debian policy](https://www.debian.org/doc/debian-policy/ch-docs.html#copyright-information) requires. Some packages use GPL/LGPL terms; see the corresponding-source instructions below. |
 | `argparse` npm dependency (gateway) | 2.0.1 | Python-2.0 declared in its package metadata; full license and copyright text is retained at `/app/node_modules/argparse/LICENSE`. |
 | `spdx-exceptions` npm dependency (workspace, through npm) | 2.5.0 | CC-BY-3.0 declared in package metadata. The data derives from the SPDX specification: © 2010–2015 Linux Foundation and its Contributors, [source attribution](https://github.com/jslicense/spdx-exceptions.json#copyright-and-licensing), [license](https://creativecommons.org/licenses/by/3.0/legalcode.en). No changes were made to this data by Paseo Gateway. |
@@ -46,13 +48,15 @@ condition and maintainer decision; it is not a legal opinion.
 ## Debian corresponding source
 
 [Debian's guidance for binary redistributors](https://www.debian.org/CD/vendors/legal)
-explains that distributing GPL-licensed binary packages requires informing
-recipients how to obtain complete corresponding source. For each published
-image digest, the release's Debian source manifest lists binary package,
-binary version, source package, and source version. Retrieve source from
-[Debian Sources](https://sources.debian.org/) or the
-[Debian snapshot archive](https://snapshot.debian.org/). If the exact source
-version is not retrievable there, preserve and provide it with the release
-before publishing that image. Installed copyright files remain available under
-`/usr/share/doc/<package>/copyright` in the images. This source manifest is
-distinct from the npm SBOM and the gateway's Apache-2.0 source tree.
+explains that distributing GPL-licensed binary packages requires providing
+corresponding source. Each GitHub release carries
+`debian-corresponding-source.tar.gz` alongside the image digest, SPDX SBOMs,
+and architecture-specific Debian package inventories. That archive contains
+the exact Debian source control files (`.dsc`) and all source archives for the
+source package versions installed in the release images. Its
+`debian-source-manifest.json` records the file names, sizes, and SHA-1/SHA-256
+checksums; the build verifies the checksums declared by each `.dsc` before
+publishing. Files originate from the
+[Debian snapshot archive](https://snapshot.debian.org/). Installed copyright
+files remain under `/usr/share/doc/<package>/copyright` in the images. The
+source archive is distinct from the npm SBOM and this project's source tree.

@@ -10,7 +10,7 @@ and [release policy](release-policy.md) for the support boundary.
 
 The locally qualified provider is Docker Desktop Kubernetes 1.34.3 with its
 containerd image store and a default dynamic StorageClass. Have `kubectl`, Helm,
-`openssl`, `uuidgen`, and `tar` installed. Reserve at least 4 CPUs, 8 GiB RAM and
+`openssl` and `tar` installed. Reserve at least 4 CPUs, 8 GiB RAM and
 15 GiB free **inside Docker's VM** for the gateway and two modest workspaces.
 Workspace requests and provider workloads may need more. This is one active
 gateway per namespace; high availability and EKS qualification remain future work.

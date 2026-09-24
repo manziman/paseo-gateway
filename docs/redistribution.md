@@ -59,6 +59,20 @@ missing-license, or unexpected copyleft/proprietary entry instead of assuming
 an npm registry entry proves redistribution permission. Keep package and OS
 license files in the images and attach the notice to the chart/GitHub release.
 
+Before checksum generation and upload, bundle the exact Debian source files for
+every image and architecture inventory:
+
+```sh
+python3 scripts/bundle-debian-sources.py "$RELEASE_OUTPUT" "$RELEASE_OUTPUT"/*-debian-sources.tsv
+```
+
+This writes `debian-corresponding-source.tar.gz` and
+`debian-source-manifest.json` into the release output directory. The script
+fetches each `.dsc` and associated source archive from Debian Snapshot,
+checks the downloaded size and SHA-1, and verifies SHA-256 values against the
+`.dsc` before producing the release asset. Download cache files stay outside
+the upload directory. Attach both files and include them in `SHA256SUMS`.
+
 The maintainer confirmed on 2026-09-24 that Claude Code will remain bundled
 after reviewing the [Anthropic product preinstallation conditions](https://code.claude.com/docs/en/legal-and-compliance).
 The exact candidate check must verify the CLI is unmodified, retains built-in

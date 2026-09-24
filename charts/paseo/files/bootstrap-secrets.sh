@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Creates only missing retained gateway Secrets. Requires kubectl, openssl and
-# uuidgen; no Node checkout, Docker image build, or chart installation needed.
+# Creates only missing retained gateway Secrets. Requires kubectl and openssl;
+# no Node checkout, Docker image build, or chart installation needed.
 usage() {
   echo "Usage: $0 --context CONTEXT --namespace NAMESPACE [--identity-secret NAME] [--backend-secret NAME] [--signing-secret NAME]" >&2
 }
@@ -42,7 +42,7 @@ if [[ "$identity_secret" == "$backend_secret" || "$identity_secret" == "$signing
   exit 2
 fi
 
-for command in kubectl openssl uuidgen; do
+for command in kubectl openssl; do
   if ! command -v "$command" >/dev/null; then
     echo "$command is required" >&2
     exit 2
@@ -76,7 +76,12 @@ ensure_secret() {
   printf '%s' "$(openssl rand -hex 32)" > "$temp_dir/password"
   local files=("--from-file=password=$temp_dir/password")
   if [[ "$role" == identity ]]; then
-    printf '%s' "$(uuidgen)" > "$temp_dir/serverId"
+    local raw variant
+    raw="$(openssl rand -hex 16)"
+    printf -v variant '%x' "$(( (16#${raw:16:1} & 3) | 8 ))"
+    printf '%s-%s-4%s-%s%s-%s' \
+      "${raw:0:8}" "${raw:8:4}" "${raw:13:3}" "$variant" "${raw:17:3}" "${raw:20:12}" \
+      > "$temp_dir/serverId"
     files+=("--from-file=serverId=$temp_dir/serverId")
   fi
   if ! kubectl --context "$context" --namespace "$namespace" create secret generic "$name" "${files[@]}" >/dev/null; then

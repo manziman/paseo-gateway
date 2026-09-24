@@ -196,6 +196,27 @@ export function verifyImage(name, image, version, output, command = run, env = p
       { env },
     );
     writeFileSync(join(output, `${name}-${architecture}-debian-sources.tsv`), `${sources}\n`);
+    const licenses = command(
+      "docker",
+      [
+        "run",
+        "--rm",
+        "--platform",
+        platform,
+        "--network=none",
+        "--mount",
+        `type=bind,source=${resolve("scripts/inventory-npm-licenses.mjs")},target=/inventory.mjs,readonly`,
+        "--entrypoint",
+        "node",
+        reference,
+        "/inventory.mjs",
+        name === "gateway" ? "/app/node_modules" : "/usr/local/lib/node_modules",
+      ],
+      { env },
+    );
+    if (!Array.isArray(JSON.parse(licenses)) || JSON.parse(licenses).length === 0)
+      throw new Error("Image npm license inventory is empty");
+    writeFileSync(join(output, `${name}-${architecture}-npm-licenses.json`), `${licenses}\n`);
     if (name === "workspace") {
       command("npm", ["run", "test:upstream"], {
         env: { ...env, UPSTREAM_TEST_IMAGE: reference, DOCKER_DEFAULT_PLATFORM: platform },
@@ -374,6 +395,18 @@ export async function prepare(version, revision, command = run) {
   writeFileSync(join(output, "artifacts.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   for (const [name, image] of Object.entries(images))
     verifyImage(name, image, version, output, command);
+  command(
+    "python3",
+    [
+      "scripts/bundle-debian-sources.py",
+      output,
+      ...readdirSync(output)
+        .filter((file) => file.endsWith("-debian-sources.tsv"))
+        .sort()
+        .map((file) => join(output, file)),
+    ],
+    { stdio: "inherit" },
+  );
   const env = anonymousEnvironment();
   for (const image of Object.values(images)) {
     for (const platform of platforms)

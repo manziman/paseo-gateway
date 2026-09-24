@@ -21,7 +21,7 @@ resource names are fixed.
   and install namespaced Deployments, RBAC, NetworkPolicies, and Services. The
   runtime ServiceAccount needs namespaced CRUD for its owned resources; the chart
   does not grant cluster-wide runtime permissions.
-- `kubectl`, `openssl`, and `uuidgen` for the packaged Secret bootstrap helper.
+- `kubectl` and `openssl` for the packaged Secret bootstrap helper.
   Images and chart must be pullable from the selected registry. Public GHCR
   visibility is verified separately from chart packaging.
 
