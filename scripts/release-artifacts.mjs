@@ -152,9 +152,29 @@ export function ensureImage(name, version, revision, output, command = run) {
   writeFileSync(join(output, `${name}-index.json`), `${JSON.stringify(image.manifest, null, 2)}\n`);
   return { repository, digest: resolvedDigest };
 }
+// Resolve through the immutable index, then use distinct child digests locally.
+// Docker's classic store cannot load both platforms under one index digest.
+export function platformReferences(image, command = run, env = process.env) {
+  const index = JSON.parse(
+    command(
+      "docker",
+      ["buildx", "imagetools", "inspect", "--raw", `${image.repository}@${image.digest}`],
+      { env },
+    ),
+  );
+  return platforms.map((platform) => {
+    const [os, architecture] = platform.split("/");
+    const child = index.manifests?.find(
+      (entry) => entry.platform?.os === os && entry.platform?.architecture === architecture,
+    );
+    if (!/^sha256:[a-f0-9]{64}$/.test(child?.digest ?? ""))
+      throw new Error(`Missing or invalid image digest for ${platform}`);
+    return { platform, reference: `${image.repository}@${child.digest}` };
+  });
+}
 export function verifyImage(name, image, version, output, command = run, env = process.env) {
   const reference = `${image.repository}@${image.digest}`;
-  for (const platform of platforms) {
+  for (const { platform, reference } of platformReferences(image, command, env)) {
     const architecture = platform.split("/")[1];
     command("docker", ["pull", "--platform", platform, reference], { env, stdio: "inherit" });
     const common = ["run", "--rm", "--platform", platform, "--network=none", "--entrypoint"];
@@ -409,8 +429,8 @@ export async function prepare(version, revision, command = run) {
   );
   const env = anonymousEnvironment();
   for (const image of Object.values(images)) {
-    for (const platform of platforms)
-      command("docker", ["pull", "--platform", platform, `${image.repository}@${image.digest}`], {
+    for (const { platform, reference } of platformReferences(image, command, env))
+      command("docker", ["pull", "--platform", platform, reference], {
         env,
         stdio: "inherit",
       });

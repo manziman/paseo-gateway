@@ -27,7 +27,7 @@ the version below with the selected published alpha release. Images and the char
 are public; registry login is unnecessary.
 
 ```sh
-export PASEO_VERSION=1.0.0-alpha.1
+export PASEO_VERSION=1.0.0-alpha.2
 helm pull oci://ghcr.io/manziman/charts/paseo-kubernetes \
   --version "$PASEO_VERSION"
 tar -xzf "paseo-kubernetes-${PASEO_VERSION}.tgz"
