@@ -1,4 +1,4 @@
-FROM ghcr.io/getpaseo/paseo:0.9.1@sha256:9aae08258b6ff85853da3144ef48c2fd355cfe644500ca4d6041753da589098d
+FROM ghcr.io/getpaseo/paseo:0.9.2@sha256:d413ff361bc4018d559da3d517a6d5a9eaca721fbb1b71ae8df3dcf7a965c136
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends gh openssh-client \
     && rm -rf /var/lib/apt/lists/*
