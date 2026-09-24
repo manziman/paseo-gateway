@@ -146,7 +146,11 @@ test("first-publish GHCR denial needs exact owner allowlist and independent API 
     throw Object.assign(new Error(status), { stderr: status });
   };
   assert.equal(inspect(`${repository}:1.0.0-alpha.1`, command, env), null);
-  assert.throws(() => inspect(`${repository}:1.0.0-alpha.2`, command, env));
+  // A source fix after a partially published first candidate reserves a new
+  // alpha version; still-missing allowlisted packages must remain creatable.
+  assert.equal(inspect(`${repository}:1.0.0-alpha.2`, command, env), null);
+  assert.throws(() => inspect(`${repository}:1.0.0`, command, env));
+  assert.throws(() => inspect(`${repository}:1.0.0-beta.1`, command, env));
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, {}));
   status = "HTTP 403";
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, env));

@@ -37,7 +37,9 @@ The registry owner must check package-name ownership before first publication.
 GHCR can return authorization-denied for a not-yet-created package, so the first
 alpha supports an explicit, temporary `GHCR_BOOTSTRAP_PACKAGES` repository variable
 listing only verified-absent repositories. The adapter additionally checks the
-package API and limits this exception to the first alpha. Other authentication,
+package API and limits this exception to alpha candidates while that one-time
+allowlist remains configured. A source fix can advance the candidate version
+before all three packages exist. Other authentication,
 network and unexpected manifest failures remain errors.
 
 New packages default to private even when source is public. Set all three package

@@ -51,10 +51,10 @@ export function inspect(reference, command = run, environment = process.env) {
       !/unauthorized|denied|forbidden/i.test(stderr)
     )
       return null;
-    const repository = reference.replace(/:1\.0\.0-alpha\.1$/, "");
+    const repository = reference.replace(/:\d+\.\d+\.\d+-alpha\.\d+$/, "");
     const bootstrap = (environment.GHCR_BOOTSTRAP_PACKAGES ?? "").split(",");
     if (
-      reference === `${repository}:1.0.0-alpha.1` &&
+      reference !== repository &&
       Object.values(repositories).includes(repository) &&
       bootstrap.includes(repository) &&
       /unauthorized|denied|forbidden/i.test(stderr)
