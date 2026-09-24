@@ -25,7 +25,21 @@ workspace as `failed`. This does not mean the host connection failed. Start a
 fresh fixture with the sidebar's **New workspace (+)**, select the intended
 **Project**, choose **Launch → Chat**, then select the provider in the composer
 and submit the test prompt. Use the project's displayed name; it can differ from
-its internal ID.
+its internal ID. For the cold-start check, first use a fresh desktop preference
+state with **zero Ready workspaces** (existing fixtures may remain Suspended).
+The provider/model picker must populate for the selected project, and that
+initial prompted Chat submission must create the first workspace and agent.
+Record the time to discover providers, a bounded diagnostic error if it fails,
+and whether retry works. A saved provider preference or a previously Ready
+workspace invalidates this cold-start check. It is tracked in
+[#65](https://github.com/manziman/paseo-gateway/issues/65).
+
+Until that check passes, a manual workaround is to submit a **blank** New
+Workspace Chat composer, wait for its workspace to become Ready, then select
+the provider and create Chat **inside that same workspace**. Launching a blank
+Terminal can also create a workspace without selecting a provider. Neither
+path verifies the first prompted Chat flow or repairs project-scoped provider
+discovery on the New Workspace screen.
 
 1. **Connection and projects:** Connect, select the gateway host, and confirm its project list. Disconnect/reconnect once and verify the same host and projects reappear. Check that an incorrect password is rejected, then restore the correct one.
 2. **Two-workspace isolation:** Create two test workspaces in the authorized project. Start one agent in each with distinct short prompts. Verify each conversation and workspace shows only its own prompt, reply, and status. Note the provider and any error displayed; do not copy credential details into evidence.

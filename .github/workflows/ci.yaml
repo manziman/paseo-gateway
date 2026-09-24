@@ -48,6 +48,7 @@ jobs:
       - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
       - run: node scripts/codex-auth-contract.mjs paseo-workspace:dev
       - run: npm run test:upstream
+      - run: npm run test:provider-probe
   upstream-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
@@ -65,3 +66,4 @@ jobs:
       - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
       - run: node scripts/codex-auth-contract.mjs paseo-workspace:dev
       - run: npm run test:upstream
+      - run: npm run test:provider-probe

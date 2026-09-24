@@ -46,6 +46,8 @@ import {
   workspaceDescriptor,
 } from "./catalog.js";
 import type { DownloadHandles } from "./downloads.js";
+import { projectForCatalogPath } from "./provider-catalog.js";
+import type { ProviderCatalog } from "./provider-catalog-service.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
 import type { GatewayRuntime } from "./runtime-status.js";
 import { UploadStaging } from "./uploads.js";
@@ -127,6 +129,9 @@ export interface SessionOptions {
   namespace: string;
   backendPassword: string;
   backendSecure?: boolean;
+  providerCatalog?: Pick<ProviderCatalog, "snapshot" | "watch"> & {
+    identity(project: Project): Promise<{ fingerprint: string }>;
+  };
   directory: DirectoryGeneration;
   hello: WSHelloMessage;
   emit: (message: SessionOutboundMessage | JsonObject) => void;
@@ -157,6 +162,7 @@ export class GatewaySession {
   private readonly pages = new DirectoryPages();
   private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
+  private readonly providerWatches = new Map<string, { projectUid: string; release: () => void }>();
   private closed = false;
   private watchingWorkspaces = false;
   private refreshing = false;
@@ -345,6 +351,45 @@ export class GatewaySession {
     const project = projects.find((p) => p.metadata.name === workspace.spec.projectRef);
     if (!project) throw new Error("Workspace project no longer exists");
     return project;
+  }
+
+  private async scopedProviderSnapshot(
+    catalog: Pick<ProviderCatalog, "snapshot"> & {
+      identity(project: Project): Promise<{ fingerprint: string }>;
+    },
+    project: Project,
+    force = false,
+  ) {
+    let originalFingerprint: string;
+    try {
+      originalFingerprint = (await catalog.identity(project)).fingerprint;
+    } catch {
+      // The catalog schedules a bounded retry when broker output is absent.
+      await catalog.snapshot(project, force);
+      throw new Error("Provider discovery configuration is unavailable");
+    }
+    const entries = await catalog.snapshot(project, force);
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Provider catalog project access changed");
+    if ((await catalog.identity(current)).fingerprint !== originalFingerprint)
+      throw new Error("Provider catalog configuration changed");
+    // The final identity read can await Secret/ConfigMap API calls. Recheck the
+    // caller and Project after that await so revocation cannot leak a snapshot.
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Provider catalog project access or configuration changed");
+    return entries;
   }
 
   async handle(message: SessionInboundMessage) {
@@ -896,6 +941,61 @@ export class GatewaySession {
         throw new Error("Create workspaces through the cluster workspace operation first");
     }
     if (providerRequests.has(message.type)) {
+      if (typeof record.cwd === "string" && record.cwd.startsWith("/projects/")) {
+        const project = projectForCatalogPath(record.cwd, projects);
+        if (!project) throw new Error("Provider catalog project is not authorized or configured");
+        const catalog = this.options.providerCatalog;
+        if (!catalog) throw new Error("Project provider discovery is unavailable");
+        if (!project.metadata.uid) throw new Error("Provider catalog Project UID is unavailable");
+        const previousWatch = this.providerWatches.get(project.metadata.name);
+        if (previousWatch?.projectUid !== project.metadata.uid) {
+          previousWatch?.release();
+          const projectUid = project.metadata.uid;
+          const release = catalog.watch(project.metadata.name, () => {
+            void (async () => {
+              if (this.closed) return;
+              const current = projectForCatalogPath(
+                projectPath(project.metadata.name),
+                (await this.records()).projects,
+              );
+              if (!current || current.metadata.uid !== projectUid) return;
+              const entries = await this.scopedProviderSnapshot(catalog, current);
+              if (!this.closed)
+                this.options.emit({
+                  type: "providers_snapshot_update",
+                  payload: {
+                    cwd: projectPath(current.metadata.name),
+                    entries,
+                    generatedAt: new Date().toISOString(),
+                  },
+                });
+            })().catch(() => {});
+          });
+          this.providerWatches.set(project.metadata.name, { projectUid, release });
+        }
+        if (message.type === "get_providers_snapshot_request") {
+          const entries = await this.scopedProviderSnapshot(catalog, project);
+          this.options.emit({
+            type: "get_providers_snapshot_response",
+            payload: {
+              requestId,
+              cwd: projectPath(project.metadata.name),
+              entries,
+              generatedAt: new Date().toISOString(),
+            },
+          });
+          return;
+        }
+        if (message.type === "refresh_providers_snapshot_request") {
+          await this.scopedProviderSnapshot(catalog, project, true);
+          this.options.emit({
+            type: "refresh_providers_snapshot_response",
+            payload: { requestId, acknowledged: true },
+          });
+          return;
+        }
+        throw new Error("Project-scoped provider operation requires a workspace");
+      }
       const workspace =
         typeof record.cwd === "string"
           ? selectWorkspace(record, active)
@@ -1131,6 +1231,8 @@ export class GatewaySession {
 
   async close() {
     this.closed = true;
+    for (const watch of this.providerWatches.values()) watch.release();
+    this.providerWatches.clear();
     this.labels?.releaseEmitter(this.options.emit);
     this.options.operations?.close?.(this.options.emit);
     await Promise.allSettled(

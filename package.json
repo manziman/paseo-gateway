@@ -30,6 +30,7 @@
     "generate:crds": "node --import tsx scripts/generate-crds.ts",
     "credentials": "node --import tsx scripts/credentials.ts",
     "test:upstream": "node --import tsx scripts/upstream-test.ts",
+    "test:provider-probe": "node --import tsx scripts/provider-probe-contract.ts",
     "release": "semantic-release",
     "test:release": "node --test tests/release*.mjs",
     "test:pr-title": "node --test scripts/check-pr-title.test.mjs",

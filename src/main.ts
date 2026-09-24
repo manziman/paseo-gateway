@@ -9,6 +9,7 @@ import { GitHubAppBroker } from "./credentials/github-app.js";
 import { AgentIdentityRegistry } from "./gateway/agent-identity.js";
 import { deleteArchivedInventory } from "./gateway/agent-inventory.js";
 import { AgentRouting } from "./gateway/agent-routing.js";
+import { ProviderCatalog } from "./gateway/provider-catalog-service.js";
 import { ScheduleService } from "./gateway/schedules.js";
 import { startGateway } from "./gateway/server.js";
 import { WorkspaceOperations } from "./gateway/workspace-operations.js";
@@ -38,30 +39,27 @@ async function main() {
   if (password.length < 32 || backendPassword.length < 32 || !serverId)
     throw new Error("Invalid retained identity Secret");
   const abort = new AbortController();
-  const controller = new WorkspaceController(
-    store,
-    {
-      workspaceImage: required("WORKSPACE_IMAGE"),
-      storageSize: process.env.WORKSPACE_STORAGE_SIZE ?? "5Gi",
-      storageClass: process.env.WORKSPACE_STORAGE_CLASS,
-      storageAccessMode: z
-        .enum(["ReadWriteOnce", "ReadWriteOncePod"])
-        .parse(process.env.WORKSPACE_STORAGE_ACCESS_MODE ?? "ReadWriteOnce"),
-      tlsSecret: process.env.WORKSPACE_TLS_SECRET || undefined,
-      backendSecret: process.env.BACKEND_SECRET_NAME ?? "paseo-backend",
-      imagePullPolicy: z
-        .enum(["Always", "IfNotPresent", "Never"])
-        .parse(process.env.WORKSPACE_IMAGE_PULL_POLICY ?? "IfNotPresent"),
-      gatewayUrl: required("GATEWAY_INTERNAL_URL"),
-    },
-    {
-      namespaceLimit,
-      access: new WorkspaceAccess(store, scopedAuth),
-      beforeSuspend: (workspace) => operations.snapshotSuspendedInventory(workspace),
-      beforeArchive: (workspace) => operations.snapshotInventory(workspace),
-      purgeInventory: (workspace) => deleteArchivedInventory(store, workspace),
-    },
-  );
+  const runtimeConfig = {
+    workspaceImage: required("WORKSPACE_IMAGE"),
+    storageSize: process.env.WORKSPACE_STORAGE_SIZE ?? "5Gi",
+    storageClass: process.env.WORKSPACE_STORAGE_CLASS,
+    storageAccessMode: z
+      .enum(["ReadWriteOnce", "ReadWriteOncePod"])
+      .parse(process.env.WORKSPACE_STORAGE_ACCESS_MODE ?? "ReadWriteOnce"),
+    tlsSecret: process.env.WORKSPACE_TLS_SECRET || undefined,
+    backendSecret: process.env.BACKEND_SECRET_NAME ?? "paseo-backend",
+    imagePullPolicy: z
+      .enum(["Always", "IfNotPresent", "Never"])
+      .parse(process.env.WORKSPACE_IMAGE_PULL_POLICY ?? "IfNotPresent"),
+    gatewayUrl: required("GATEWAY_INTERNAL_URL"),
+  } as const;
+  const controller = new WorkspaceController(store, runtimeConfig, {
+    namespaceLimit,
+    access: new WorkspaceAccess(store, scopedAuth),
+    beforeSuspend: (workspace) => operations.snapshotSuspendedInventory(workspace),
+    beforeArchive: (workspace) => operations.snapshotInventory(workspace),
+    purgeInventory: (workspace) => deleteArchivedInventory(store, workspace),
+  });
   const operations = new WorkspaceOperations({
     store,
     namespace,
@@ -101,6 +99,13 @@ async function main() {
       .parse(process.env.SCHEDULE_HISTORY_LIMIT ?? 50),
   });
   await schedules.initialize();
+  const providerCatalog = new ProviderCatalog({
+    store,
+    namespace,
+    backendPassword,
+    backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
+    runtime: runtimeConfig,
+  });
   const broker = new GitHubAppBroker(store);
   const codexBroker = new CodexSubscriptionBroker(store);
   // Provider endpoints must not delay the HTTP startup probe. The serialized
@@ -111,6 +116,7 @@ async function main() {
     password,
     backendPassword,
     backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
+    providerCatalog,
     tls: process.env.GATEWAY_TLS_CERT_FILE
       ? {
           cert: await readFile(required("GATEWAY_TLS_CERT_FILE")),
@@ -138,6 +144,13 @@ async function main() {
       return !abort.signal.aborted;
     },
   });
+  // Orphan recovery can wait on Kubernetes deletion. It must not delay the
+  // HTTP startup probe; active catalog records still fence duplicate runs.
+  void providerCatalog
+    .initialize()
+    .catch(() =>
+      console.error(JSON.stringify({ level: "error", event: "provider_probe_recovery_failed" })),
+    );
   const loop = runController(controller, store, abort.signal, () => {
     // API bodies can contain Secrets. Log an event, never serialize arbitrary exceptions.
     console.error(JSON.stringify({ level: "error", event: "reconcile_failed" }));

@@ -18,8 +18,9 @@ export interface Store {
   setResidency(workspace: Workspace, residency: Workspace["spec"]["residency"]): Promise<void>;
   status(workspace: Workspace, status: WorkspaceStatus): Promise<void>;
   get(kind: InfrastructureKind, name: string): Promise<Infrastructure | undefined>;
-  create(object: Infrastructure): Promise<void>;
+  create(object: Infrastructure): Promise<Infrastructure>;
   deletePod(name: string, uid: string): Promise<void>;
+  deleteService(name: string, uid: string): Promise<void>;
   secret(name: string): Promise<V1Secret>;
   credentialProfile(name: string): Promise<CredentialProfile | undefined>;
   configMap(name: string): Promise<V1ConfigMap>;
