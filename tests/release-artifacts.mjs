@@ -12,6 +12,7 @@ import {
   sha256,
   validateImage,
   validateInput,
+  verifyImage,
 } from "../scripts/release-artifacts.mjs";
 
 const version = "1.0.0-alpha.1";
@@ -146,10 +147,136 @@ test("first-publish GHCR denial needs exact owner allowlist and independent API 
     throw Object.assign(new Error(status), { stderr: status });
   };
   assert.equal(inspect(`${repository}:1.0.0-alpha.1`, command, env), null);
-  assert.throws(() => inspect(`${repository}:1.0.0-alpha.2`, command, env));
+  // A source fix after a partially published first candidate reserves a new
+  // alpha version; still-missing allowlisted packages must remain creatable.
+  assert.equal(inspect(`${repository}:1.0.0-alpha.2`, command, env), null);
+  assert.throws(() => inspect(`${repository}:1.0.0`, command, env));
+  assert.throws(() => inspect(`${repository}:1.0.0-beta.1`, command, env));
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, {}));
   status = "HTTP 403";
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, env));
   status = "exists";
   assert.throws(() => inspect(`${repository}:1.0.0-alpha.1`, command, env));
 });
+
+function platformManifest() {
+  const index = manifest();
+  for (const architecture of ["amd64", "arm64"]) {
+    const childDigest = `sha256:${(architecture === "amd64" ? "c" : "d").repeat(64)}`;
+    const child = index.manifests.find((entry) => entry.platform?.architecture === architecture);
+    const attestation = index.manifests.find(
+      (entry) => entry.annotations?.["vnd.docker.reference.digest"] === child.digest,
+    );
+    child.digest = childDigest;
+    attestation.annotations["vnd.docker.reference.digest"] = childDigest;
+  }
+  return index;
+}
+
+// Classic Docker stores can associate a repository digest with only one platform.
+// Runtime and scanner checks must use the same child that was actually pulled.
+for (const name of ["gateway", "workspace"]) {
+  test(`${name} verification uses platform children and preserves index attestations`, (t) => {
+    const output = temporary(t);
+    const image = { repository: `example/${name}`, digest };
+    const indexReference = `${image.repository}@${digest}`;
+    const index = platformManifest();
+    const expected = new Map(
+      index.manifests
+        .filter((entry) => entry.platform)
+        .map((entry) => [
+          `${entry.platform.os}/${entry.platform.architecture}`,
+          `${image.repository}@${entry.digest}`,
+        ]),
+    );
+    const loaded = new Map();
+    const calls = [];
+    const env = { RELEASE_TEST: "fixture" };
+    const command = (binary, args, options) => {
+      calls.push({ binary, args, env: options.env });
+      if (args.includes("--raw")) return JSON.stringify(index);
+      if (binary === "docker" && args[0] === "pull") {
+        const reference = args.at(-1);
+        const platform = args[args.indexOf("--platform") + 1];
+        if (loaded.has(reference) && loaded.get(reference) !== platform)
+          throw new Error(`cannot overwrite digest ${reference}`);
+        loaded.set(reference, platform);
+      }
+      if (args.includes("/inventory.mjs")) return '[{"name":"example","license":"MIT"}]';
+      if (args.includes("--format")) return '{"evidence":true}';
+      return "";
+    };
+    verifyImage(name, image, version, output, command, env);
+    assert.equal(loaded.size, 2);
+    for (const [platform, reference] of expected) {
+      assert.equal(loaded.get(reference), platform);
+      const platformCalls = calls.filter(
+        ({ args }) =>
+          args.includes("--platform") && args[args.indexOf("--platform") + 1] === platform,
+      );
+      assert.equal(platformCalls.filter(({ args }) => args[0] === "pull").length, 1);
+      assert.equal(platformCalls.filter(({ args }) => args[0] === "run").length, 3);
+      assert.equal(platformCalls.filter(({ binary }) => binary === "trivy").length, 3);
+      for (const call of platformCalls) {
+        const actualReference =
+          call.args[0] === "run"
+            ? call.args[call.args.indexOf("--entrypoint") + 2]
+            : call.args.at(-1);
+        assert.equal(actualReference, reference);
+        assert.deepEqual(call.env, env);
+      }
+    }
+    const upstream = calls.filter(({ binary }) => binary === "npm");
+    assert.equal(upstream.length, name === "workspace" ? 2 : 0);
+    for (const call of upstream) {
+      assert.deepEqual(call.args, ["run", "test:upstream"]);
+      assert.deepEqual(call.env, {
+        ...env,
+        DOCKER_DEFAULT_PLATFORM: call.env.DOCKER_DEFAULT_PLATFORM,
+        UPSTREAM_TEST_IMAGE: expected.get(call.env.DOCKER_DEFAULT_PLATFORM),
+      });
+    }
+    if (name === "workspace")
+      assert.deepEqual(
+        upstream.map((call) => call.env.DOCKER_DEFAULT_PLATFORM),
+        [...expected.keys()],
+      );
+    const inspections = calls.filter(({ args }) => args.includes("inspect"));
+    assert.deepEqual(
+      inspections.map(({ args }) => args),
+      [
+        ["buildx", "imagetools", "inspect", "--raw", indexReference],
+        ["buildx", "imagetools", "inspect", indexReference, "--format", "{{json .Provenance}}"],
+        ["buildx", "imagetools", "inspect", indexReference, "--format", "{{json .SBOM}}"],
+      ],
+    );
+    for (const call of inspections) assert.deepEqual(call.env, env);
+  });
+}
+
+for (const failure of ["missing", "invalid"]) {
+  test(`verification fails closed for a ${failure} platform child before pulling or running`, (t) => {
+    const output = temporary(t);
+    const index = platformManifest();
+    if (failure === "missing") {
+      index.manifests = index.manifests.filter((entry) => entry.platform?.architecture !== "arm64");
+    } else {
+      index.manifests.find((entry) => entry.platform?.architecture === "arm64").digest =
+        "sha256:bad";
+    }
+    const calls = [];
+    const command = (binary, args) => {
+      calls.push([binary, ...args]);
+      if (args.includes("--raw")) return JSON.stringify(index);
+      throw new Error("Unexpected operation after invalid platform resolution");
+    };
+    assert.throws(
+      () =>
+        verifyImage("gateway", { repository: "example/gateway", digest }, version, output, command),
+      /Missing or invalid image digest for linux\/arm64/,
+    );
+    assert.deepEqual(calls, [
+      ["docker", "buildx", "imagetools", "inspect", "--raw", `example/gateway@${digest}`],
+    ]);
+  });
+}
