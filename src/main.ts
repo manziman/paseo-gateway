@@ -41,8 +41,9 @@ async function main() {
       storageSize: process.env.WORKSPACE_STORAGE_SIZE ?? "5Gi",
       storageClass: process.env.WORKSPACE_STORAGE_CLASS,
       backendSecret: process.env.BACKEND_SECRET_NAME ?? "paseo-backend",
-      imagePullPolicy:
-        process.env.WORKSPACE_IMAGE_PULL_POLICY === "Never" ? "Never" : "IfNotPresent",
+      imagePullPolicy: z
+        .enum(["Always", "IfNotPresent", "Never"])
+        .parse(process.env.WORKSPACE_IMAGE_PULL_POLICY ?? "IfNotPresent"),
       gatewayUrl: required("GATEWAY_INTERNAL_URL"),
     },
     {

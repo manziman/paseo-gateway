@@ -1,9 +1,15 @@
 image:
-  repository: paseo-gateway
-  tag: dev
+  repository: ghcr.io/manziman/paseo-gateway
+  # Empty uses Chart.appVersion. Set digest to pin the immutable published image.
+  tag: ""
+  digest: ""
   pullPolicy: IfNotPresent
 workspace:
-  image: paseo-workspace:dev
+  repository: ghcr.io/manziman/paseo-workspace
+  tag: ""
+  digest: ""
+  # Optional complete image reference, retained for local development overrides.
+  image: ""
   pullPolicy: IfNotPresent
   storageClass: ""
   storageSize: 5Gi

@@ -1,0 +1,84 @@
+name: Chart acceptance
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: chart-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  install-upgrade:
+    name: Kubernetes ${{ matrix.kubernetes }} install/upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kubernetes: '1.32'
+            node-image: kindest/node:v1.32.11@sha256:5fc52d52a7b9574015299724bd68f183702956aa4a2116ae75a63cb574b35af8
+            helm: v3.17.3
+            kubectl: v1.32.11
+            cluster: chart-132
+            negative: '0'
+          - kubernetes: '1.35'
+            node-image: kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
+            helm: v3.20.0
+            kubectl: v1.35.0
+            cluster: chart-135
+            negative: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: ${{ matrix.helm }}
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.31.0
+          node_image: ${{ matrix.node-image }}
+          kubectl_version: ${{ matrix.kubectl }}
+          cluster_name: ${{ matrix.cluster }}
+          kubeconfig: ${{ runner.temp }}/paseo-chart-kubeconfig
+          wait: 120s
+      - name: Build candidate gateway and workspace images
+        run: |
+          docker build --tag paseo-gateway:chart-ci .
+          docker build --file docker/workspace.Dockerfile --tag paseo-workspace:chart-ci .
+          kind load docker-image paseo-gateway:chart-ci paseo-workspace:chart-ci --name "${{ matrix.cluster }}"
+      - name: Package and validate candidate chart
+        run: |
+          mkdir -p "$RUNNER_TEMP/chart-package"
+          helm package charts/paseo --version 0.0.0-chart-ci --app-version 0.0.0-chart-ci --destination "$RUNNER_TEMP/chart-package"
+          bash scripts/chart-validate.sh "$RUNNER_TEMP/chart-package/paseo-kubernetes-0.0.0-chart-ci.tgz"
+      - name: Install, exercise lifecycle, upgrade and rollback
+        env:
+          KUBECONFIG: ${{ runner.temp }}/paseo-chart-kubeconfig
+          CHART_CONTEXT: kind-${{ matrix.cluster }}
+          CHART_NAMESPACE: chart-acceptance
+          CHART_PACKAGE: ${{ runner.temp }}/chart-package/paseo-kubernetes-0.0.0-chart-ci.tgz
+          CHART_DIAGNOSTICS: ${{ runner.temp }}/chart-diagnostics
+          CHART_NEGATIVE: ${{ matrix.negative }}
+        run: bash scripts/chart-smoke.sh
+      - name: Upload redacted diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: chart-diagnostics-${{ matrix.kubernetes }}
+          path: ${{ runner.temp }}/chart-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+  acceptance:
+    name: Chart acceptance
+    if: always()
+    needs: [install-upgrade]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all Kubernetes install and upgrade checks
+        env:
+          RESULT: ${{ needs.install-upgrade.result }}
+        run: test "$RESULT" = success

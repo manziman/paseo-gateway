@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["image", "workspace", "gateway", "resources", "networkPolicy"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "$ref": "#/definitions/repository" },
+        "tag": { "$ref": "#/definitions/tag" },
+        "digest": { "$ref": "#/definitions/digest" },
+        "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "tag",
+        "digest",
+        "image",
+        "pullPolicy",
+        "storageClass",
+        "storageSize"
+      ],
+      "properties": {
+        "repository": { "$ref": "#/definitions/repository" },
+        "tag": { "$ref": "#/definitions/tag" },
+        "digest": { "$ref": "#/definitions/digest" },
+        "image": { "type": "string", "pattern": "^$|^[^[:space:]]+$" },
+        "pullPolicy": { "$ref": "#/definitions/pullPolicy" },
+        "storageClass": { "type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },
+        "storageSize": { "type": "string", "pattern": "^[1-9][0-9]*(?:[EPTGMK]i?|[eptgmk])?$" }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "signingSecret",
+        "maxRunningWorkspaces",
+        "workspaceReadyTimeoutSeconds",
+        "scheduleHistoryLimit",
+        "nodeOptions",
+        "allowedHosts",
+        "identitySecret",
+        "backendSecret"
+      ],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "signingSecret": { "$ref": "#/definitions/name" },
+        "maxRunningWorkspaces": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "workspaceReadyTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "scheduleHistoryLimit": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "nodeOptions": { "type": "string" },
+        "allowedHosts": { "type": "string", "minLength": 1 },
+        "identitySecret": { "$ref": "#/definitions/name" },
+        "backendSecret": { "$ref": "#/definitions/name" }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": { "$ref": "#/definitions/computeResources" },
+        "limits": { "$ref": "#/definitions/computeResources" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "egress"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "egress": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "rules", "profiles"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "rules": { "type": "array", "items": { "type": "object" } },
+            "profiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "rules"],
+                "properties": {
+                  "name": { "$ref": "#/definitions/name" },
+                  "rules": { "type": "array", "items": { "type": "object" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "repository": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$" },
+    "tag": { "type": "string", "pattern": "^$|^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$" },
+    "digest": { "type": "string", "pattern": "^$|^sha256:[a-f0-9]{64}$" },
+    "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
+    "computeResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": { "type": "string", "pattern": "^[1-9][0-9]*(?:m)?$" },
+        "memory": { "type": "string", "pattern": "^[1-9][0-9]*(?:[EPTGMK]i?|[eptgmk])?$" }
+      }
+    }
+  }
+}

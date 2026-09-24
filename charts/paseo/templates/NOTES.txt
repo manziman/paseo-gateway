@@ -1,0 +1,12 @@
+Paseo gateway is installed in namespace {{ .Release.Namespace }}.
+
+Retain and back up the {{ .Values.gateway.identitySecret }}, {{ .Values.gateway.backendSecret }},
+and {{ .Values.gateway.signingSecret }} Secrets with the workspace PVCs and custom resources.
+The chart never creates or rotates these Secrets. Do not run a second gateway
+release in this namespace.
+
+The chart's README documents explicit CRD upgrades, identity bootstrap,
+storage lifecycle, and rollback limitations. Helm does not upgrade CRDs in crds/.
+
+Connect locally with an explicitly selected context:
+  kubectl --context CONTEXT --namespace {{ .Release.Namespace }} port-forward service/paseo-gateway 6768:8080

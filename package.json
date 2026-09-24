@@ -17,7 +17,7 @@
     "format": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "check": "npm run typecheck && npm run lint && npm test && npm run test:pr-title && npm run test:release && npm run build",
     "dev:doctor": "bash scripts/doctor.sh",
     "dev:up": "bash scripts/dev-up.sh",
     "dev:connect": "bash scripts/connect.sh",
@@ -29,7 +29,10 @@
     "test:cli": "node --import tsx scripts/cli-test.ts",
     "generate:crds": "node --import tsx scripts/generate-crds.ts",
     "credentials": "node --import tsx scripts/credentials.ts",
-    "test:upstream": "node --import tsx scripts/upstream-test.ts"
+    "test:upstream": "node --import tsx scripts/upstream-test.ts",
+    "release": "semantic-release",
+    "test:release": "node --test tests/release*.mjs",
+    "test:pr-title": "node --test scripts/check-pr-title.test.mjs"
   },
   "repository": {
     "type": "git",
@@ -45,10 +48,17 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/exec": "7.1.0",
+    "@semantic-release/github": "12.0.10",
+    "@semantic-release/release-notes-generator": "14.1.1",
     "@types/node": "24.13.5",
     "@types/ws": "8.18.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "25.0.9",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "yaml": "2.8.3"
   }
 }

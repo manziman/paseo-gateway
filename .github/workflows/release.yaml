@@ -1,0 +1,126 @@
+name: Release
+on:
+  push:
+    branches: [alpha]
+  workflow_dispatch:
+    inputs:
+      recover_version:
+        description: 'Tagged alpha version to recover after partial publication; empty runs semantic-release'
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.ref == 'refs/heads/alpha' && github.repository == 'manziman/paseo-gateway'
+    uses: ./.github/workflows/ci.yaml
+  chart:
+    if: github.ref == 'refs/heads/alpha' && github.repository == 'manziman/paseo-gateway'
+    uses: ./.github/workflows/chart.yaml
+  publish:
+    needs: [validate, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RECOVER_VERSION: ${{ inputs.recover_version }}
+      GHCR_BOOTSTRAP_PACKAGES: ${{ vars.GHCR_BOOTSTRAP_PACKAGES }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select and verify recovery source
+        if: inputs.recover_version != ''
+        shell: bash
+        run: |
+          [[ "$RECOVER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]
+          git merge-base --is-ancestor "v${RECOVER_VERSION}" origin/alpha
+          # Recovery must use this validated workflow commit, never execute arbitrary historical code.
+          test "$(git rev-parse "v${RECOVER_VERSION}^{commit}")" = "$(git rev-parse HEAD)"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.17.3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+          cache: true
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Authenticate Helm
+        run: printf '%s' "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - run: npm ci
+      - name: Publish alpha release
+        if: inputs.recover_version == ''
+        run: npm run release
+      - name: Repair an incomplete GitHub release
+        if: inputs.recover_version != ''
+        run: node scripts/release-recover.mjs "$RECOVER_VERSION"
+      - name: Read verified candidate subjects
+        id: subjects
+        shell: bash
+        run: |
+          if test -f release-assets/artifacts.json; then
+            jq -r '"version=" + .version, "gateway=" + .images.gateway.digest, "workspace=" + .images.workspace.digest' release-assets/artifacts.json >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        id: gateway-attestation
+        if: steps.subjects.outputs.version != ''
+        with:
+          subject-name: ghcr.io/manziman/paseo-gateway
+          subject-digest: ${{ steps.subjects.outputs.gateway }}
+          push-to-registry: true
+          create-storage-record: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        id: workspace-attestation
+        if: steps.subjects.outputs.version != ''
+        with:
+          subject-name: ghcr.io/manziman/paseo-workspace
+          subject-digest: ${{ steps.subjects.outputs.workspace }}
+          push-to-registry: true
+          create-storage-record: false
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        id: chart-attestation
+        if: steps.subjects.outputs.version != ''
+        with:
+          subject-path: release-assets/*.tgz
+      - name: Attach signed evidence to the qualification draft
+        if: steps.subjects.outputs.version != ''
+        env:
+          RELEASE_VERSION: ${{ steps.subjects.outputs.version }}
+          GATEWAY_BUNDLE: ${{ steps.gateway-attestation.outputs.bundle-path }}
+          WORKSPACE_BUNDLE: ${{ steps.workspace-attestation.outputs.bundle-path }}
+          CHART_BUNDLE: ${{ steps.chart-attestation.outputs.bundle-path }}
+        run: |
+          test "$(gh release view "v${RELEASE_VERSION}" --json isDraft --jq .isDraft)" = true
+          cp "$GATEWAY_BUNDLE" release-assets/gateway-attestation.jsonl
+          cp "$WORKSPACE_BUNDLE" release-assets/workspace-attestation.jsonl
+          cp "$CHART_BUNDLE" release-assets/chart-attestation.jsonl
+          node --input-type=module -e 'import {writeChecksums} from "./scripts/release-artifacts.mjs"; writeChecksums("release-assets")'
+          gh release upload "v${RELEASE_VERSION}" release-assets/*-attestation.jsonl release-assets/SHA256SUMS --clobber
+      - name: Preserve candidate evidence, including failed partial publication
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-assets/
+          if-no-files-found: ignore
+          retention-days: 30

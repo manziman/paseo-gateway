@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: {{ include "paseo.gatewayImage" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -61,7 +61,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: WORKSPACE_IMAGE
-              value: {{ .Values.workspace.image | quote }}
+              value: {{ include "paseo.workspaceImage" . | quote }}
             - name: WORKSPACE_IMAGE_PULL_POLICY
               value: {{ .Values.workspace.pullPolicy | quote }}
             - name: WORKSPACE_STORAGE_CLASS
