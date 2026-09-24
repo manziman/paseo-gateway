@@ -1,5 +1,10 @@
 # Paseo Gateway (independent project)
 
+[![CI](https://github.com/manziman/paseo-gateway/actions/workflows/ci.yaml/badge.svg)](https://github.com/manziman/paseo-gateway/actions/workflows/ci.yaml)
+[![Chart acceptance](https://github.com/manziman/paseo-gateway/actions/workflows/chart.yaml/badge.svg)](https://github.com/manziman/paseo-gateway/actions/workflows/chart.yaml)
+[Releases](https://github.com/manziman/paseo-gateway/releases) ·
+[Security policy](SECURITY.md)
+
 This is an independent project. It is not affiliated with or endorsed by Paseo
 or its maintainers.
 
