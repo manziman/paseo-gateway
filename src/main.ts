@@ -6,7 +6,9 @@ import { runController, WorkspaceController } from "./controller/controller.js";
 import { WorkspaceAccess } from "./controller/workspace-access.js";
 import { CodexSubscriptionBroker } from "./credentials/codex-subscription.js";
 import { GitHubAppBroker } from "./credentials/github-app.js";
+import { AgentIdentityRegistry } from "./gateway/agent-identity.js";
 import { deleteArchivedInventory } from "./gateway/agent-inventory.js";
+import { AgentRouting } from "./gateway/agent-routing.js";
 import { ScheduleService } from "./gateway/schedules.js";
 import { startGateway } from "./gateway/server.js";
 import { WorkspaceOperations } from "./gateway/workspace-operations.js";
@@ -21,6 +23,7 @@ function required(name: string): string {
 async function main() {
   const namespace = required("PASEO_NAMESPACE");
   const store = new KubernetesStore(loadKubernetesConfig(process.env.KUBE_CONTEXT), namespace);
+  const agentRouting = new AgentRouting(new AgentIdentityRegistry(store));
   const password = (await readFile(required("GATEWAY_PASSWORD_FILE"), "utf8")).trim();
   const backendPassword = (await readFile(required("BACKEND_PASSWORD_FILE"), "utf8")).trim();
   const serverId = (await readFile(required("GATEWAY_ID_FILE"), "utf8")).trim();
@@ -64,6 +67,7 @@ async function main() {
     namespace,
     backendPassword,
     backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
+    agentRouting,
     admission: new WorkspaceAdmission(store, namespaceLimit),
     readyTimeoutMs:
       z.coerce
@@ -73,6 +77,15 @@ async function main() {
         .max(3600)
         .parse(process.env.WORKSPACE_READY_TIMEOUT_SECONDS ?? 300) * 1000,
   });
+  // Opportunistic migration of pre-GUID agents. Explicit caller-chosen GUID
+  // creation also awaits a complete scan and fails closed if inventory is missing.
+  void operations
+    .backfillAgentIdentities()
+    .catch(() =>
+      console.error(
+        JSON.stringify({ level: "error", event: "agent_identity_backfill_incomplete" }),
+      ),
+    );
   const schedules = new ScheduleService({
     records: store,
     store,
@@ -108,6 +121,7 @@ async function main() {
     scopedAuth,
     workspaceLogs: (workspace, tail) => store.workspaceLogs(workspace, tail),
     inventoryStore: store,
+    agentRouting,
     advertised: { name: process.env.GATEWAY_NAME },
     operations: {
       creationLifecycle: operations.creationLifecycle,

@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   AgentSnapshotPayloadSchema,
+  CreationSnapshotSchema,
   type SessionInboundMessage,
   SessionInboundMessageSchema,
   type SessionOutboundMessage,
@@ -22,7 +23,12 @@ import {
 } from "../domain.js";
 import type { ControlRecord, RecordStore } from "../kubernetes/records.js";
 import { type Store, statusCode } from "../kubernetes/store.js";
-import { archiveAgentInventory, retainedAgentMetadata } from "./agent-inventory.js";
+import {
+  archiveAgentInventory,
+  readArchivedInventory,
+  retainedAgentMetadata,
+} from "./agent-inventory.js";
+import type { AgentRouting } from "./agent-routing.js";
 import {
   authorizeProject,
   authorizeWorkspace,
@@ -53,6 +59,7 @@ export interface WorkspaceOperationsOptions {
   namespace: string;
   backendPassword: string;
   backendSecure?: boolean;
+  agentRouting?: AgentRouting;
   admission: WorkspaceAdmission;
   readyTimeoutMs?: number;
   pollMs?: number;
@@ -83,23 +90,104 @@ function retainedCreationResponse(response: SessionOutboundMessage): SessionOutb
 export class WorkspaceOperations {
   readonly creationLifecycle = true;
   private readonly journal: CreationJournal;
+  private backfillInFlight?: Promise<void>;
   constructor(private readonly options: WorkspaceOperationsOptions) {
-    this.journal = new CreationJournal(options.store, async (principal, identity) => {
-      const { workspaces } = await this.records(principal);
-      if (identity) {
-        const row = workspaces.find(
+    this.journal = new CreationJournal(
+      options.store,
+      async (principal, identity) => {
+        const { workspaces } = await this.records(principal);
+        if (identity) {
+          const row = workspaces.find(
+            (row) =>
+              row.metadata.name === identity.workspaceId &&
+              row.metadata.uid === identity.workspaceUid,
+          );
+          if (!row || !authorizeWorkspace(principal, row))
+            throw new Error("Creation workspace access denied");
+        }
+      },
+      async (snapshot, principal, identity) => {
+        if (!options.agentRouting || (!snapshot.agent && !snapshot.agentId)) return snapshot;
+        if (!identity) throw new Error("Creation identity has no UID-bound workspace");
+        const { workspaces } = await this.records(principal);
+        const workspace = workspaces.find(
           (row) =>
             row.metadata.name === identity.workspaceId &&
-            row.metadata.uid === identity.workspaceUid,
+            row.metadata.uid === identity.workspaceUid &&
+            authorizeWorkspace(principal, row),
         );
-        if (!row || !authorizeWorkspace(principal, row))
-          throw new Error("Creation workspace access denied");
-      }
-    });
+        if (!workspace) throw new Error("Creation workspace access denied");
+        return CreationSnapshotSchema.parse(
+          await options.agentRouting.project(snapshot, workspace),
+        );
+      },
+    );
   }
 
   close(emit: Emit) {
     this.journal.close(emit);
+  }
+
+  /** Before honoring a caller-chosen GUID, claim every discoverable pre-upgrade
+   * agent from its UID-bound source. An unavailable source blocks that create.
+   * Gateway-generated random GUIDs do not require this global scan.
+   */
+  async backfillAgentIdentities() {
+    const agentRouting = this.options.agentRouting;
+    if (!agentRouting) return;
+    if (this.backfillInFlight) return this.backfillInFlight;
+    const task = (async () => {
+      const workspaces = await this.options.store.workspaces();
+      for (const workspace of workspaces) {
+        if (!workspace.metadata.uid || workspace.metadata.deletionTimestamp)
+          throw new Error("Agent identity backfill is incomplete");
+        if (workspace.status?.storageDeletedAt)
+          throw new Error("Agent identity backfill cannot verify purged workspace history");
+        if (workspace.spec.residency === "Running" && workspace.status?.phase !== "Ready")
+          throw new Error("Agent identity backfill cannot verify a restarting workspace");
+        if (workspace.spec.residency !== "Running") {
+          const retained = await readArchivedInventory(this.options.store, workspace);
+          for (const entry of retained)
+            await agentRouting.claim(workspace, parseScopedId(entry.agent.id).backendId);
+          continue;
+        }
+        const { backend } = await this.backend(workspace, () => {});
+        try {
+          let cursor: string | undefined;
+          const seenCursors = new Set<string>();
+          do {
+            const response = await backend.request({
+              type: "fetch_agents_request",
+              requestId: randomUUID(),
+              filter: { includeArchived: true },
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            if (response.type !== "fetch_agents_response")
+              throw new Error("Agent identity backfill returned an invalid inventory");
+            for (const entry of response.payload.entries)
+              await agentRouting.claim(workspace, entry.agent.id);
+            cursor = response.payload.pageInfo.hasMore
+              ? (response.payload.pageInfo.nextCursor ?? undefined)
+              : undefined;
+            if (response.payload.pageInfo.hasMore && !cursor)
+              throw new Error("Agent identity backfill inventory lacks a continuation cursor");
+            if (cursor) {
+              if (seenCursors.has(cursor) || seenCursors.size >= 100)
+                throw new Error("Agent identity backfill inventory exceeds its page limit");
+              seenCursors.add(cursor);
+            }
+          } while (cursor);
+        } finally {
+          await backend.close();
+        }
+      }
+    })();
+    this.backfillInFlight = task;
+    try {
+      await task;
+    } finally {
+      this.backfillInFlight = undefined;
+    }
   }
 
   private async records(principal: GatewayPrincipal) {
@@ -309,11 +397,20 @@ export class WorkspaceOperations {
     try {
       // Backend caller IDs are local to a pod. Preserve cross-pod parentage as the
       // upstream label instead of asking a different daemon to resolve that ID.
-      if (message.callerAgentId) {
-        const caller = parseScopedId(message.callerAgentId);
-        const origin = workspaces.find((row) => row.metadata.name === caller.workspaceId);
+      let callerAgentId = message.callerAgentId;
+      if (callerAgentId) {
+        const caller = this.options.agentRouting
+          ? await this.options.agentRouting.resolveAgent(
+              callerAgentId,
+              workspaces.filter((row) => authorizeWorkspace(principal, row)),
+            )
+          : parseScopedId(callerAgentId);
+        const callerWorkspaceId =
+          "workspace" in caller ? caller.workspace.metadata.name : caller.workspaceId;
+        const origin = workspaces.find((row) => row.metadata.name === callerWorkspaceId);
         if (!origin || !authorizeWorkspace(principal, origin))
           throw new Error("Caller agent workspace access denied");
+        if ("backendAgentId" in caller) callerAgentId = caller.backendAgentId;
       }
       let input = SessionInboundMessageSchema.parse(
         translate(
@@ -325,7 +422,7 @@ export class WorkspaceOperations {
             worktree: undefined,
             labels: {
               ...message.labels,
-              ...(message.callerAgentId ? { "paseo.parent-agent-id": message.callerAgentId } : {}),
+              ...(callerAgentId ? { "paseo.parent-agent-id": callerAgentId } : {}),
             },
           },
           workspace,
@@ -360,7 +457,11 @@ export class WorkspaceOperations {
             throw new Error(
               "Agent creation outcome unknown; inspect the workspace before retrying",
             );
-          const response = SessionOutboundMessageSchema.parse(previous.value.response);
+          const response = SessionOutboundMessageSchema.parse(
+            this.options.agentRouting
+              ? await this.options.agentRouting.project(previous.value.response, workspace)
+              : previous.value.response,
+          );
           if ("payload" in response && "requestId" in response.payload)
             response.payload.requestId = message.requestId;
           return response;
@@ -382,11 +483,26 @@ export class WorkspaceOperations {
           throw new Error("Creation workspace access denied or workspace changed");
       };
       await validate();
+      let reservedAgentId: string | undefined;
+      if (this.options.agentRouting && input.type === "agent.create.request") {
+        if (input.agentId) await this.backfillAgentIdentities();
+        reservedAgentId = await this.options.agentRouting.reserveForCreate(
+          workspace,
+          input.agentId ?? randomUUID(),
+        );
+        input = SessionInboundMessageSchema.parse({ ...input, agentId: reservedAgentId });
+      }
       await progress?.({}, undefined, true);
       if (uploads) input = await uploads.replace(input, backend, validate);
       await validate();
+      if (reservedAgentId)
+        await this.options.agentRouting?.resolveAgent(reservedAgentId, [workspace]);
+      await validate();
+      const translated = translate(await backend.request(input), workspace, localId, "out");
       const response = SessionOutboundMessageSchema.parse(
-        translate(await backend.request(input), workspace, localId, "out"),
+        this.options.agentRouting
+          ? await this.options.agentRouting.project(translated, workspace)
+          : translated,
       );
       if (receipt)
         await this.options.store.updateRecord({
@@ -496,6 +612,10 @@ export class WorkspaceOperations {
     if (!workspace && unavailable)
       throw new Error("Scheduled target lookup is incomplete while workspaces are unavailable");
     if (!workspace?.metadata.uid) throw new Error("Scheduled target agent does not exist");
+    if (this.options.agentRouting) {
+      await this.options.agentRouting.claim(workspace, agentId);
+      await this.options.agentRouting.resolveAgent(agentId, [workspace]);
+    }
     return {
       projectId: workspace.spec.projectRef,
       credentialProfile: workspace.spec.credentialProfile,
@@ -695,6 +815,33 @@ export class WorkspaceOperations {
         );
       });
       try {
+        const validateDispatch = async () => {
+          const latest = await this.options.store.workspaces();
+          const current = latest.find((row) => row.metadata.name === input.targetWorkspaceId);
+          const origin = input.origin
+            ? latest.find((row) => row.metadata.name === input.origin?.workspaceId)
+            : undefined;
+          if (
+            !current ||
+            current.metadata.uid !== input.targetWorkspaceUid ||
+            current.metadata.deletionTimestamp ||
+            current.spec.residency !== "Running" ||
+            current.status?.phase !== "Ready" ||
+            current.spec.projectRef !== input.projectId ||
+            current.spec.credentialProfile !== input.credentialProfile ||
+            (input.origin &&
+              (!origin ||
+                origin.metadata.uid !== input.origin.workspaceUid ||
+                origin.metadata.deletionTimestamp ||
+                origin.spec.residency !== "Running" ||
+                input.origin.expiresAt <= Math.floor(Date.now() / 1000) ||
+                this.options.revokedTokenIds?.has(input.origin.tokenId)))
+          )
+            throw new ScheduleDispatchRejected(
+              "Scheduled target or origin changed before dispatch",
+            );
+          return current;
+        };
         const target = await backend.backend
           .request({
             type: "fetch_agent_request",
@@ -712,28 +859,17 @@ export class WorkspaceOperations {
           target.payload.agent.archivedAt
         )
           throw new ScheduleDispatchRejected("Scheduled target agent is unavailable or archived");
-        const latest = await this.options.store.workspaces();
-        const current = latest.find((row) => row.metadata.name === input.targetWorkspaceId);
-        const origin = input.origin
-          ? latest.find((row) => row.metadata.name === input.origin?.workspaceId)
-          : undefined;
-        if (
-          !current ||
-          current.metadata.uid !== input.targetWorkspaceUid ||
-          current.metadata.deletionTimestamp ||
-          current.spec.residency !== "Running" ||
-          current.status?.phase !== "Ready" ||
-          current.spec.projectRef !== input.projectId ||
-          current.spec.credentialProfile !== input.credentialProfile ||
-          (input.origin &&
-            (!origin ||
-              origin.metadata.uid !== input.origin.workspaceUid ||
-              origin.metadata.deletionTimestamp ||
-              origin.spec.residency !== "Running" ||
-              input.origin.expiresAt <= Math.floor(Date.now() / 1000) ||
-              this.options.revokedTokenIds?.has(input.origin.tokenId)))
-        )
-          throw new ScheduleDispatchRejected("Scheduled target or origin changed before dispatch");
+        const current = await validateDispatch();
+        if (this.options.agentRouting) {
+          await this.options.agentRouting.claim(current, input.schedule.target.agentId);
+          const route = await this.options.agentRouting.resolveAgent(
+            input.schedule.target.agentId,
+            [current],
+          );
+          if (route.workspace.metadata.uid !== input.targetWorkspaceUid)
+            throw new ScheduleDispatchRejected("Scheduled target agent identity changed");
+        }
+        await validateDispatch();
         // After this mutation is sent, any lost response is ambiguous and is never retried.
         const response = await backend.backend.request({
           type: "send_agent_message_request",
@@ -805,7 +941,9 @@ export class WorkspaceOperations {
       );
     return {
       workspaceId: workspace.metadata.name,
-      agentId: parseScopedId(response.payload.agent.id).backendId,
+      agentId: this.options.agentRouting
+        ? response.payload.agent.id
+        : parseScopedId(response.payload.agent.id).backendId,
     };
   }
 

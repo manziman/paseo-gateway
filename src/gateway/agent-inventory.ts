@@ -9,6 +9,7 @@ import {
 import { z } from "zod";
 import type { Workspace } from "../domain.js";
 import type { RecordStore } from "../kubernetes/records.js";
+import type { AgentRouting } from "./agent-routing.js";
 import type { Backend } from "./backend.js";
 import { object, translate } from "./routing.js";
 
@@ -156,6 +157,7 @@ export async function readArchivedInventory(
     { type: "fetch_agents_request" | "fetch_agent_history_request" }
   >,
   availability?: "archived" | "suspended" | "stale",
+  agentRouting?: AgentRouting,
 ) {
   if (workspace.status?.storageDeletedAt) return [];
   const record = workspace.metadata.uid
@@ -179,7 +181,7 @@ export async function readArchivedInventory(
     },
   });
   if (response.type !== "fetch_agents_response") throw new Error("Invalid archived inventory");
-  return response.payload.entries
+  const entries = response.payload.entries
     .map(({ agent, project, ...rest }) => ({
       ...rest,
       project,
@@ -223,6 +225,13 @@ export async function readArchivedInventory(
         ].some((value) => value?.toLowerCase().includes(search))
       );
     });
+  if (!agentRouting) return entries;
+  const projected = await agentRouting.project(entries, workspace);
+  if (!Array.isArray(projected)) throw new Error("Invalid projected inventory");
+  return entries.map((entry, index) => ({
+    ...entry,
+    agent: AgentSnapshotPayloadSchema.parse(object(projected[index]).agent),
+  }));
 }
 
 /** Run when the workspace retention deadline releases its data, using its immutable UID. */

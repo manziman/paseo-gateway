@@ -54,6 +54,7 @@ export async function startGateway(options: ServerOptions) {
   }
   const principals = new WeakMap<WebSocket, GatewayPrincipal>();
   const directory = new DirectoryGeneration();
+  const agentRouting = options.agentRouting;
   const labels = options.inventoryStore
     ? new WorkspaceLabels(options.inventoryStore, options.store, directory)
     : undefined;
@@ -66,6 +67,9 @@ export async function startGateway(options: ServerOptions) {
     scopedAuth: options.scopedAuth,
   });
   const sessions = new Set<GatewaySession>();
+  const releaseCollision = agentRouting?.onCollision(() => {
+    for (const session of sessions) session.invalidateAgentDirectory();
+  });
   const listener: RequestListener = async (request, response) => {
     try {
       if (request.url === "/healthz") {
@@ -221,6 +225,7 @@ export async function startGateway(options: ServerOptions) {
           runtime,
           directory,
           labels,
+          agentRouting,
           downloadHandles,
           principal,
           hello: envelope,
@@ -304,6 +309,7 @@ export async function startGateway(options: ServerOptions) {
     server,
     directory,
     async close() {
+      releaseCollision?.();
       for (const ws of wss.clients) ws.terminate();
       await Promise.allSettled([...sessions].map((s) => s.close()));
       await new Promise<void>((resolve) => wss.close(() => resolve()));

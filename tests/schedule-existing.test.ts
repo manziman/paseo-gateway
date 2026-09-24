@@ -3,11 +3,14 @@ import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { StoredScheduleSchema } from "@getpaseo/protocol/schedule/types";
 import { describe, expect, it } from "vitest";
 import { WorkspaceAdmission } from "../src/controller/admission.js";
+import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
+import { AgentRouting } from "../src/gateway/agent-routing.js";
 import type { Backend } from "../src/gateway/backend.js";
 import { ScheduleDispatchRejected } from "../src/gateway/schedules.js";
 import { WorkspaceOperations } from "../src/gateway/workspace-operations.js";
 import type { RecordStore } from "../src/kubernetes/records.js";
 import { MemoryStore, workspace } from "./fixtures.js";
+import { MemoryRecordStore } from "./record-store.js";
 
 function fixture(backend: Backend) {
   const store = new MemoryStore();
@@ -118,6 +121,76 @@ describe("existing-agent schedule target", () => {
     if (!target) throw new Error("Missing target workspace");
     target.metadata.uid = "replacement";
     finishLookup();
+    await expect(dispatch).rejects.toBeInstanceOf(ScheduleDispatchRejected);
+    expect(sends).toBe(0);
+  });
+
+  it("rejects a stopped target after the final durable agent-route lookup", async () => {
+    const store = new MemoryStore();
+    store.workspaceRows = [workspace()];
+    const records = new MemoryRecordStore();
+    const combined = Object.assign(store, {
+      records: records.records.bind(records),
+      record: records.record.bind(records),
+      createRecord: records.createRecord.bind(records),
+      updateRecord: records.updateRecord.bind(records),
+      deleteRecord: records.deleteRecord.bind(records),
+    });
+    const routing = new AgentRouting(new AgentIdentityRegistry(combined));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const lookup = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const original = routing.resolveAgent.bind(routing);
+    routing.resolveAgent = async (...args) => {
+      const result = await original(...args);
+      entered();
+      await held;
+      return result;
+    };
+    let sends = 0;
+    const backend: Backend = {
+      async connect() {},
+      async close() {},
+      send() {},
+      binary() {},
+      async request(message) {
+        if (message.type === "open_project_request")
+          return outbound({
+            type: "open_project_response",
+            payload: { workspace: { id: "local" } },
+          });
+        if (message.type === "fetch_agent_request")
+          return outbound({ type: "fetch_agent_response", payload: { agent: { id: agentId } } });
+        if (message.type === "send_agent_message_request") sends++;
+        throw new Error("Unexpected request");
+      },
+    };
+    const operations = new WorkspaceOperations({
+      store: combined,
+      namespace: "test",
+      backendPassword: "backend",
+      admission: new WorkspaceAdmission(store, 10),
+      agentRouting: routing,
+      backendFactory: () => backend,
+    });
+    const dispatch = operations.dispatchSchedule({
+      schedule,
+      runId: randomUUID(),
+      projectId: "example",
+      credentialProfile: "claude-default",
+      targetWorkspaceId: "one",
+      targetWorkspaceUid: "uid-one",
+    });
+    await lookup;
+    const target = store.workspaceRows[0];
+    if (!target) throw new Error("Missing target workspace");
+    target.spec.residency = "Suspended";
+    release();
     await expect(dispatch).rejects.toBeInstanceOf(ScheduleDispatchRejected);
     expect(sends).toBe(0);
   });

@@ -15,6 +15,7 @@ import {
   type WorkspaceDescriptorPayload,
   type WSHelloMessage,
 } from "@getpaseo/protocol/messages";
+import { z } from "zod";
 import { resourceName } from "../controller/resources.js";
 import {
   API_VERSION,
@@ -27,6 +28,7 @@ import {
 import type { RecordStore } from "../kubernetes/records.js";
 import type { Store } from "../kubernetes/store.js";
 import { readArchivedInventory } from "./agent-inventory.js";
+import type { AgentRouting } from "./agent-routing.js";
 import {
   authorizeProject,
   authorizeWorkspace,
@@ -106,6 +108,7 @@ const providerRequests = new Set([
 export interface SessionOptions {
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
+  agentRouting?: AgentRouting;
   labels?: WorkspaceLabels;
   downloadHandles?: DownloadHandles;
   principal?: GatewayPrincipal;
@@ -141,7 +144,14 @@ export interface SessionOptions {
 export class GatewaySession {
   private readonly connections = new Map<
     string,
-    Promise<{ backend: Backend; workspace: Workspace; localId: string; retire: () => void }>
+    Promise<{
+      backend: Backend;
+      workspace: Workspace;
+      localId: string;
+      retire: () => void;
+      drain: () => Promise<void>;
+      enqueue: <T>(work: () => Promise<T>) => Promise<T>;
+    }>
   >();
   private readonly slots = new TerminalSlots();
   private readonly pages = new DirectoryPages();
@@ -160,6 +170,13 @@ export class GatewaySession {
       (options.inventoryStore
         ? new WorkspaceLabels(options.inventoryStore, options.store, options.directory)
         : undefined);
+  }
+
+  private async project(value: unknown, workspace: Workspace, localId: string) {
+    const translated = translate(value, workspace, localId, "out");
+    return this.options.agentRouting
+      ? this.options.agentRouting.project(translated, workspace)
+      : translated;
   }
 
   private async connection(workspace: Workspace) {
@@ -186,6 +203,17 @@ export class GatewaySession {
     const promise = (async () => {
       let localId = workspace.status?.backendWorkspaceId ?? "";
       let retired = false;
+      let eventTail: Promise<void> = Promise.resolve();
+      let pendingEvents = 0;
+      let pendingEventBytes = 0;
+      const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+        const result = eventTail.then(work);
+        eventTail = result.then(
+          () => {},
+          () => {},
+        );
+        return result;
+      };
       const onMessage = (message: SessionOutboundMessage) => {
         if (this.closed || retired) return;
         if (message.type === "status" && message.payload.status === "server_info") return;
@@ -198,13 +226,29 @@ export class GatewaySession {
           }
           return;
         }
-        const translated = object(translate(message, workspace, localId, "out"));
-        if (message.type === "agent_update") {
-          const payload = object(translated.payload);
-          payload.generation = this.options.directory.id;
-          payload.seq = this.options.directory.next();
+        const eventBytes = Buffer.byteLength(JSON.stringify(message));
+        pendingEvents++;
+        pendingEventBytes += eventBytes;
+        if (pendingEvents > 256 || pendingEventBytes > 16 * 1024 * 1024) {
+          this.options.disconnect();
+          return;
         }
-        this.options.emit(translated);
+        eventTail = enqueue(async () => {
+          if (this.closed || retired) return;
+          const translated = object(await this.project(message, workspace, localId));
+          if (this.closed || retired) return;
+          if (message.type === "agent_update") {
+            const payload = object(translated.payload);
+            payload.generation = this.options.directory.id;
+            payload.seq = this.options.directory.next();
+          }
+          this.options.emit(translated);
+        })
+          .catch(() => this.options.disconnect())
+          .finally(() => {
+            pendingEvents--;
+            pendingEventBytes -= eventBytes;
+          });
       };
       const onBinary = (data: Uint8Array) => {
         if (this.closed || retired) return;
@@ -258,6 +302,8 @@ export class GatewaySession {
           retire: () => {
             retired = true;
           },
+          drain: () => eventTail,
+          enqueue,
         };
       } catch (error) {
         await backend.close();
@@ -587,7 +633,13 @@ export class GatewaySession {
       )) {
         if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
           entries.push(
-            ...(await readArchivedInventory(this.options.inventoryStore, workspace, message)),
+            ...(await readArchivedInventory(
+              this.options.inventoryStore,
+              workspace,
+              message,
+              undefined,
+              this.options.agentRouting,
+            )),
           );
           continue;
         }
@@ -616,12 +668,24 @@ export class GatewaySession {
               reply.type !== "fetch_agent_history_response"
             )
               throw new Error("Unexpected agent inventory response");
+            const projected = await connection.enqueue(async () => {
+              const translated = translate(
+                reply.payload.entries,
+                workspace,
+                connection.localId,
+                "out",
+              );
+              return this.options.agentRouting
+                ? this.options.agentRouting.project(translated, workspace)
+                : translated;
+            });
+            if (!Array.isArray(projected)) throw new Error("Invalid projected agent page");
             entries.push(
-              ...reply.payload.entries.map((entry) => {
-                const translated = object(translate(entry, workspace, connection.localId, "out"));
+              ...projected.map((entry) => {
+                const row = object(entry);
                 return {
-                  ...translated,
-                  agent: AgentSnapshotPayloadSchema.parse(translated.agent),
+                  ...row,
+                  agent: AgentSnapshotPayloadSchema.parse(row.agent),
                   syncSeq: this.options.directory.next(),
                 };
               }),
@@ -639,6 +703,7 @@ export class GatewaySession {
               workspace,
               message,
               workspace.spec.residency === "Suspended" ? "suspended" : "stale",
+              this.options.agentRouting,
             )),
           );
         }
@@ -685,7 +750,12 @@ export class GatewaySession {
     if (message.type === "agent.timeline.set_subscription.request") {
       const grouped = new Map<string, string[]>();
       for (const id of message.agentIds) {
-        const route = parseScopedId(id);
+        const resolved = this.options.agentRouting
+          ? await this.options.agentRouting.resolveAgent(id, workspaces)
+          : undefined;
+        const route = resolved
+          ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+          : parseScopedId(id);
         grouped.set(route.workspaceId, [
           ...(grouped.get(route.workspaceId) ?? []),
           route.backendId,
@@ -695,6 +765,18 @@ export class GatewaySession {
         const workspace = active.find((w) => w.metadata.name === id);
         if (!workspace) continue;
         const connection = await this.connection(workspace);
+        if (this.options.agentRouting) {
+          for (const agentId of grouped.get(id) ?? [])
+            await this.options.agentRouting.resolveAgent(agentId, [workspace]);
+        }
+        const current = (await this.records()).workspaces.find((row) => row.metadata.name === id);
+        if (
+          !current ||
+          current.metadata.uid !== workspace.metadata.uid ||
+          current.spec.residency !== "Running" ||
+          current.status?.phase !== "Ready"
+        )
+          throw new Error("Timeline workspace is stopped or replaced; reconnect before acting");
         await connection.backend.request({
           type: message.type,
           requestId: randomUUID(),
@@ -707,8 +789,17 @@ export class GatewaySession {
       });
       return;
     }
-    if (message.type === "fetch_agent_request" && message.agentId.includes("~")) {
-      const route = parseScopedId(message.agentId);
+    if (
+      message.type === "fetch_agent_request" &&
+      (message.agentId.includes("~") ||
+        (this.options.agentRouting && z.guid().safeParse(message.agentId).success))
+    ) {
+      const resolved = this.options.agentRouting
+        ? await this.options.agentRouting.resolveAgent(message.agentId, workspaces)
+        : undefined;
+      const route = resolved
+        ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+        : parseScopedId(message.agentId);
       const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
       if (
         workspace &&
@@ -721,18 +812,26 @@ export class GatewaySession {
             workspace,
             undefined,
             workspace.spec.residency === "Archived" ? "archived" : "suspended",
+            this.options.agentRouting,
           )
-        ).find((row) => row.agent.id === message.agentId);
+        ).find(
+          (row) => row.agent.id === (this.options.agentRouting ? route.backendId : message.agentId),
+        );
         this.options.emit({
           type: "fetch_agent_response",
           payload: { requestId, agent: entry?.agent ?? null, project: entry?.project, error: null },
         });
         return;
       }
+      if (workspace) {
+        await this.forward(message, workspace);
+        return;
+      }
     }
     if (
       typeof record.agentId === "string" &&
       !record.agentId.includes("~") &&
+      (!this.options.agentRouting || !z.guid().safeParse(record.agentId).success) &&
       message.type !== "agent.create.request"
     ) {
       const query = record.agentId;
@@ -744,8 +843,11 @@ export class GatewaySession {
             workspace,
             undefined,
             workspace.spec.residency === "Archived" ? "archived" : "suspended",
+            this.options.agentRouting,
           )) {
-            const id = parseScopedId(entry.agent.id).backendId;
+            const id = this.options.agentRouting
+              ? entry.agent.id
+              : parseScopedId(entry.agent.id).backendId;
             if (id.startsWith(query) || entry.agent.title?.toLowerCase() === query.toLowerCase())
               matches.push({
                 type: "fetch_agent_response",
@@ -765,7 +867,7 @@ export class GatewaySession {
           throw new Error("Unexpected agent lookup response");
         if (reply.payload.agent) {
           const translated = SessionOutboundMessageSchema.parse(
-            translate(reply, workspace, connection.localId, "out"),
+            await this.project(reply, workspace, connection.localId),
           );
           if (translated.type === "fetch_agent_response")
             matches.push({ ...translated, payload: { ...translated.payload, requestId } });
@@ -833,8 +935,13 @@ export class GatewaySession {
     ) {
       record.workspaceId = this.subscriptions.get(record.subscriptionId);
     }
-    const workspace = selectWorkspace(record, active);
-    await this.forward(message, workspace);
+    const routed = this.options.agentRouting
+      ? SessionInboundMessageSchema.parse(
+          await this.options.agentRouting.route(message, workspaces),
+        )
+      : message;
+    const workspace = selectWorkspace(object(routed), active);
+    await this.forward(routed, workspace);
   }
 
   private async forward(message: SessionInboundMessage, workspace: Workspace) {
@@ -852,6 +959,11 @@ export class GatewaySession {
     };
     await validate();
     const connection = await this.connection(workspace);
+    const routed = this.options.agentRouting
+      ? SessionInboundMessageSchema.parse(
+          await this.options.agentRouting.route(message, [workspace]),
+        )
+      : message;
     if (message.type === "file_download_token_request") {
       const root = workspacePath(workspace.metadata.name);
       const path = posix.normalize(message.path);
@@ -860,10 +972,17 @@ export class GatewaySession {
       if (!this.options.downloadHandles) throw new Error("Gateway download routing is unavailable");
     }
     let input = SessionInboundMessageSchema.parse(
-      translate(message, workspace, connection.localId, "in"),
+      translate(routed, workspace, connection.localId, "in"),
     );
     if (input.type === "send_agent_message_request")
       input = await this.uploads.replace(input, connection.backend, validate);
+    await validate();
+    if (this.options.agentRouting) {
+      // A UUID can be quarantined by another session while connect/upload waits.
+      await this.options.agentRouting.route(routed, [workspace]);
+    }
+    // The final durable identity read can await Kubernetes. Recheck principal and
+    // exact workspace state after it, immediately before sending the mutation.
     await validate();
     const record = object(message);
     if (typeof record.subscriptionId === "string")
@@ -883,23 +1002,28 @@ export class GatewaySession {
       return;
     }
     const reply = await connection.backend.request(input);
-    const result = object(translate(reply, workspace, connection.localId, "out"));
-    if (reply.type === "file_download_token_response" && reply.payload.token) {
-      const handles = this.options.downloadHandles;
-      if (!handles) throw new Error("Gateway download routing is unavailable");
-      object(result.payload).token = handles.issue({
-        workspace,
-        principal: this.options.principal ?? { kind: "owner" },
-        backendToken: reply.payload.token,
-        mimeType: reply.payload.mimeType,
-        fileName: reply.payload.fileName,
-        size: reply.payload.size,
-      });
-    }
-    if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
-      object(result.payload).slot = this.slots.outward(workspace.metadata.name, reply.payload.slot);
-    }
-    this.options.emit(result);
+    await connection.enqueue(async () => {
+      const result = object(await this.project(reply, workspace, connection.localId));
+      if (reply.type === "file_download_token_response" && reply.payload.token) {
+        const handles = this.options.downloadHandles;
+        if (!handles) throw new Error("Gateway download routing is unavailable");
+        object(result.payload).token = handles.issue({
+          workspace,
+          principal: this.options.principal ?? { kind: "owner" },
+          backendToken: reply.payload.token,
+          mimeType: reply.payload.mimeType,
+          fileName: reply.payload.fileName,
+          size: reply.payload.size,
+        });
+      }
+      if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
+        object(result.payload).slot = this.slots.outward(
+          workspace.metadata.name,
+          reply.payload.slot,
+        );
+      }
+      this.options.emit(result);
+    });
   }
 
   async binary(data: Uint8Array) {
@@ -1020,5 +1144,9 @@ export class GatewaySession {
     this.workspaceRuntime.clear();
     this.uploads.clear();
     this.subscriptions.clear();
+  }
+
+  invalidateAgentDirectory() {
+    this.options.disconnect();
   }
 }

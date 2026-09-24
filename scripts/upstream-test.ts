@@ -3,10 +3,17 @@ import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { CreationSnapshotSchema } from "@getpaseo/protocol/messages";
+import { WorkspaceAdmission } from "../src/controller/admission.js";
 import { resourceName } from "../src/controller/resources.js";
+import { scopedId } from "../src/domain.js";
+import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
+import { AgentRouting } from "../src/gateway/agent-routing.js";
 import { PaseoBackend } from "../src/gateway/backend.js";
 import { startGateway } from "../src/gateway/server.js";
+import { WorkspaceOperations } from "../src/gateway/workspace-operations.js";
 import { MemoryStore, workspace } from "../tests/fixtures.js";
+import { MemoryRecordStore } from "../tests/record-store.js";
 import { reportUpstreamFailure } from "./upstream-diagnostics.js";
 
 // This contract test owns every container/volume it creates. It never touches a running user daemon.
@@ -118,9 +125,44 @@ async function startDaemon(id: string) {
   throw new Error(`Upstream daemon did not start: ${id}`);
 }
 
-const store = new MemoryStore();
+const identityRecords = new MemoryRecordStore();
+const store = Object.assign(new MemoryStore(), {
+  records: identityRecords.records.bind(identityRecords),
+  record: identityRecords.record.bind(identityRecords),
+  createRecord: identityRecords.createRecord.bind(identityRecords),
+  updateRecord: identityRecords.updateRecord.bind(identityRecords),
+  deleteRecord: identityRecords.deleteRecord.bind(identityRecords),
+});
 store.workspaceRows = [workspace("one"), workspace("two")];
+let nativeCreations = 0;
+let operations: WorkspaceOperations | undefined;
 async function connectGateway() {
+  const agentRouting = new AgentRouting(new AgentIdentityRegistry(identityRecords));
+  operations = new WorkspaceOperations({
+    store,
+    namespace: "test",
+    backendPassword: password,
+    agentRouting,
+    admission: new WorkspaceAdmission(store, 10),
+    backendFactory: (row, emit) => {
+      const backend = new PaseoBackend(
+        `ws://127.0.0.1:${ports.get(row.metadata.name)}/ws`,
+        password,
+        { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
+        emit,
+        () => {},
+        () => {},
+      );
+      const request = backend.request.bind(backend);
+      backend.request = async (message) => {
+        if (message.type === "agent.create.request" || message.type === "create_agent_request")
+          nativeCreations++;
+        return request(message);
+      };
+      return backend;
+    },
+  });
+  const currentOperations = operations;
   gateway = await startGateway({
     store,
     namespace: "test",
@@ -131,6 +173,14 @@ async function connectGateway() {
     port: 0,
     allowedHosts: ["127.0.0.1"],
     ready: async () => true,
+    inventoryStore: identityRecords,
+    agentRouting,
+    operations: {
+      creationLifecycle: currentOperations.creationLifecycle,
+      close: (emit) => currentOperations.close(emit),
+      handle: (message, emit, principal, uploads) =>
+        currentOperations.handle(message, emit, principal, uploads),
+    },
     backendFactory: (row, onMessage, onBinary, onDisconnect) => {
       const backend = new PaseoBackend(
         `ws://127.0.0.1:${ports.get(row.metadata.name)}/ws`,
@@ -215,7 +265,9 @@ try {
   const created = await active.createAgent({
     config: { provider: "claude", cwd: "/workspaces/one" },
     workspaceId: "one",
+    idempotencyKey: `${prefix}-agent-one`,
   });
+  assert.match(created.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   const attachedText = `paseo-contract-upload-${randomUUID()}`;
   const staged = await active.uploadFile({
     fileName: "contract-attachment.txt",
@@ -246,7 +298,25 @@ try {
   const secondAgent = await active.createAgent({
     config: { provider: "claude", cwd: "/workspaces/two" },
     workspaceId: "two",
+    callerAgentId: created.id,
+    idempotencyKey: `${prefix}-agent-two`,
   });
+  assert.equal(nativeCreations, 2, "Both SDK creates must use production workspace operations");
+  assert.equal(secondAgent.labels["paseo.parent-agent-id"], created.id);
+  assert.ok(operations);
+  assert.deepEqual(await operations.resolveScheduleAgent(created.id, { kind: "owner" }), {
+    projectId: "example",
+    credentialProfile: "claude-default",
+    workspaceId: "one",
+    workspaceUid: "uid-one",
+  });
+  assert.match(secondAgent.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+  const agents = await active.fetchAgents();
+  assert.deepEqual(
+    new Set(agents.entries.map((entry) => entry.agent.id)),
+    new Set([created.id, secondAgent.id]),
+    "Directory must expose one stable GUID per native agent",
+  );
   const secondText = `paseo-contract-second-${randomUUID()}`;
   const secondStaged = await active.uploadFile({
     fileName: "second-attachment.txt",
@@ -292,8 +362,47 @@ try {
   );
   await active.close();
   await gateway?.close();
+  // Model an in-place upgrade: retained journals from the prior gateway contain
+  // scoped public IDs, while the replacement must publish only GUID identities.
+  const oldJournals = await identityRecords.records<Record<string, unknown>>("creation-operation");
+  assert.equal(oldJournals.length, 2, "Production creation must persist both journals");
+  for (const journal of oldJournals) {
+    const snapshot = CreationSnapshotSchema.parse(journal.value.snapshot);
+    assert.ok(snapshot.agent && snapshot.agentId && snapshot.workspaceId);
+    await identityRecords.updateRecord({
+      ...journal,
+      value: {
+        ...journal.value,
+        snapshot: {
+          ...snapshot,
+          agentId: scopedId(snapshot.workspaceId, snapshot.agentId),
+          agent: { ...snapshot.agent, id: scopedId(snapshot.workspaceId, snapshot.agent.id) },
+        },
+      },
+    });
+  }
   active = await connectGateway();
   assert.notEqual(gateway?.directory.id, firstGeneration);
+  const recoveredAgents = await active.fetchAgents();
+  assert.deepEqual(
+    new Set(recoveredAgents.entries.map((entry) => entry.agent.id)),
+    new Set([created.id, secondAgent.id]),
+    "GUID identities must persist across gateway replacement",
+  );
+  assert.equal((await active.fetchAgent(created.id))?.agent.id, created.id);
+  assert.equal((await active.fetchAgent(scopedId("one", created.id)))?.agent.id, created.id);
+  const recoveredCreation = await active.createAgent({
+    config: { provider: "claude", cwd: "/workspaces/one" },
+    workspaceId: "one",
+    idempotencyKey: `${prefix}-agent-one`,
+  });
+  assert.equal(recoveredCreation.id, created.id, "Journal replay must retain the public GUID");
+  assert.equal(nativeCreations, 2, "Gateway replacement must not replay a native creation");
+  const recoveredChild = await active.fetchAgent(secondAgent.id);
+  assert.equal(recoveredChild?.agent.labels["paseo.parent-agent-id"], created.id);
+  console.log(
+    "PASS: production creation reservation, legacy journal migration without duplicate creation, cross-Pod parent IDs, and native existing-agent schedule lookup.",
+  );
   assert.equal(
     (await fetch(gatewayHttpUrl(pendingDownload.token))).status,
     403,
