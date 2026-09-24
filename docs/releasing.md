@@ -12,8 +12,8 @@ but the workflow does not publish stable releases. The first alpha is calculated
 as `1.0.0-alpha.1` without fabricating an old release tag.
 
 Publication reruns CI and the Kubernetes chart matrix on the exact release commit.
-The publishing job has narrowly scoped GitHub contents/packages/OIDC/attestation
-permissions. Pull-request jobs have no publication credentials. All publication
+The staging job has contents/packages permissions. A separate native ARM64 job
+has contents/packages/OIDC/attestation permissions. Pull-request jobs have no publication credentials. All publication
 is serialized in one non-cancellable concurrency group; a `GITHUB_TOKEN`-created
 tag is not expected to trigger a separate workflow.
 
@@ -23,6 +23,14 @@ both architecture indexes, scans actual contents, packages a chart with immutabl
 digests, and verifies anonymous consumption before creating the draft GitHub
 release. A failed artifact version keeps its tag, so a later source fix naturally
 advances to the next alpha without rewriting artifacts. Existing versioned artifacts are never deliberately overwritten.
+All per-platform version/CLI smoke, inventory and vulnerability checks run during
+staging. AMD64 upstream daemon contracts run there too. The draft's exact image
+digests then pass gateway/runtime and upstream daemon contracts on a native
+`ubuntu-24.04-arm` runner before any GitHub signed attestations are produced.
+The native job anchors the downloaded checksum list to the staging job output,
+verifies every draft asset, signs only the expected versioned chart, attaches its
+`native-arm64-verification.json` record and signed bundles, and updates checksums.
+A native-test or signing failure leaves the release as an incomplete draft.
 BuildKit SBOM/provenance and GitHub signed attestations accompany the image/chart
 subjects. Exact revisions, digests and platform lists live in `artifacts.json`.
 
@@ -54,7 +62,8 @@ A successful workflow creates an **unpublished draft**, pending qualification.
 An incomplete run or draft is not a deployable-release announcement. Check:
 
 1. The release workflow succeeded on the tagged commit, including both architecture
-   smoke tests, fixed HIGH/CRITICAL vulnerability gates and signed attestations.
+   smoke tests, native ARM64 upstream contracts, fixed HIGH/CRITICAL vulnerability
+   gates and signed attestations.
 2. Download the draft assets into a fresh directory. Verify `SHA256SUMS` with
    `sha256sum -c` (or `shasum -a 256 -c` on macOS). Check version/revision/digests
    against the workflow and `artifacts.json`.
@@ -90,7 +99,10 @@ rerunning so that partial state and original digests remain reviewable.
   requires the workflow checkout to equal that tag's source and be in `alpha`
   history. It reuses matching image version/source/platform metadata, compares
   deterministic chart bytes, validates all registry artifacts again and repairs the unpublished
-  draft/assets. It refuses to replace an already public GitHub release.
+  draft/assets. It refuses to replace an already public GitHub release. If the
+  native job already updated draft assets/checksums before a later failure, use
+  this recovery dispatch rather than rerunning only that job: the original
+  staging checksum anchor deliberately rejects changed draft assets.
 - **Branch advanced beyond the failed tagged source:** the normal recovery
   dispatch deliberately refuses historical code execution. Diagnose and make a
   reviewed recovery change that validates the original source/evidence, or publish
@@ -109,3 +121,13 @@ prepare/publish and therefore does not test registry effects. The release tests
 exercise version calculation with temporary Git repositories plus artifact and
 failure-path fixtures. Live publication and anonymous installation remain
 separate evidence.
+
+## Native runner prerequisite
+
+GitHub lists `ubuntu-24.04-arm` as a standard Linux ARM64 runner for public
+repositories ([runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).
+The credential-free `upstream-arm64` PR/CI job builds the workspace and runs the
+same daemon suite on that runner before a release change can merge. Checkout,
+setup-node and attest are pinned JavaScript actions; no x86-only action container
+is introduced. The release job verifies the published digest again because a
+pre-publication source build does not prove the exact registry artifact.

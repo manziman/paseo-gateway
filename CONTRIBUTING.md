@@ -26,6 +26,9 @@ for protocol changes and the relevant [live tests](docs/testing.md) for lifecycl
 changes. Include evidence and explicitly identify checks you could not run.
 
 Keep controller desired-state decisions separate from gateway session behavior.
+CI requires the `upstream` AMD64 and `upstream-arm64` native ARM64 daemon checks.
+Release artifacts repeat both architecture checks against immutable digests.
+
 Use exported upstream package interfaces and exact dependency versions. Do not
 vendor Paseo implementation files or bypass TypeScript errors with `any`.
 Document public module boundaries and non-obvious invariants. Tests should cover

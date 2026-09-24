@@ -237,7 +237,7 @@ export function verifyImage(name, image, version, output, command = run, env = p
     if (!Array.isArray(JSON.parse(licenses)) || JSON.parse(licenses).length === 0)
       throw new Error("Image npm license inventory is empty");
     writeFileSync(join(output, `${name}-${architecture}-npm-licenses.json`), `${licenses}\n`);
-    if (name === "workspace") {
+    if (name === "workspace" && platform === "linux/amd64") {
       command("npm", ["run", "test:upstream"], {
         env: { ...env, UPSTREAM_TEST_IMAGE: reference, DOCKER_DEFAULT_PLATFORM: platform },
         stdio: "inherit",
