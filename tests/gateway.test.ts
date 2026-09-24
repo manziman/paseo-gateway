@@ -20,6 +20,53 @@ afterEach(async () => {
 const password = "0123456789abcdef0123456789abcdef";
 
 describe("Paseo client contract", () => {
+  it.each([
+    { origin: "paseo://app", token: password, host: "127.0.0.1", status: 101 },
+    { origin: "paseo://app", token: "wrong", host: "127.0.0.1", status: 401 },
+    { origin: "paseo://app", token: password, host: "untrusted.example", status: 401 },
+    { origin: "https://app", token: password, host: "127.0.0.1", status: 401 },
+    { origin: "paseo://app.evil.example", token: password, host: "127.0.0.1", status: 401 },
+    { origin: "paseo://app@evil.example", token: password, host: "127.0.0.1", status: 401 },
+  ])(
+    "enforces desktop origin, Host and bearer boundaries: $origin / $host / $status",
+    async (input) => {
+      const gateway = await startGateway({
+        store: new MemoryStore(),
+        namespace: "test",
+        backendPassword: password,
+        password,
+        serverId: "desktop-origin-fixture",
+        host: "127.0.0.1",
+        port: 0,
+        allowedHosts: ["127.0.0.1"],
+        ready: async () => true,
+      });
+      cleanups.push(() => gateway.close());
+      const address = gateway.server.address();
+      if (!address || typeof address === "string") throw new Error("No port");
+      const status = await new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(
+          `ws://127.0.0.1:${address.port}/ws`,
+          [`paseo.bearer.${input.token}`],
+          {
+            origin: input.origin,
+            headers: { host: input.host },
+            handshakeTimeout: 2000,
+          },
+        );
+        ws.on("unexpected-response", (_request, response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        });
+        ws.on("open", () => {
+          ws.close();
+          resolve(101);
+        });
+        ws.on("error", reject);
+      });
+      expect(status).toBe(input.status);
+    },
+  );
   it("authenticates and lists configured projects before any workspace exists", async () => {
     const store = new MemoryStore();
     const gateway = await startGateway({
