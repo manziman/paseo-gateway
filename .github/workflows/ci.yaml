@@ -46,3 +46,19 @@ jobs:
       - run: npm ci
       - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
       - run: npm run test:upstream
+  upstream-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: Require a native ARM64 host
+        run: test "$(uname -m)" = aarch64
+      - run: npm ci
+      - run: docker build --file docker/workspace.Dockerfile --tag paseo-workspace:dev .
+      - run: npm run test:upstream
