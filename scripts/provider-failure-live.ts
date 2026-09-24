@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { Agent as HttpsAgent } from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
@@ -121,8 +121,8 @@ function credentialShape(value: string): string {
   const prefix = value.slice(0, Math.min(12, value.length));
   const length = Math.max(24, value.length - prefix.length);
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
-  const bytes = randomBytes(length);
-  const candidate = prefix + [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
+  const candidate =
+    prefix + Array.from({ length }, () => alphabet[randomInt(alphabet.length)]).join("");
   assert.notEqual(candidate, value);
   return candidate;
 }
