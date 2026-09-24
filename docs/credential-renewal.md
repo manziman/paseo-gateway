@@ -50,10 +50,15 @@ to five minutes, with retry times persisted across gateway restarts.
 Output Secret annotations carry expiry, retry, and lease metadata. Do not log
 Secret bodies, JWTs, access tokens, private keys, or raw HTTP exceptions. A 403 or
 401 remains an observable failed renewal; the broker does not broaden privileges
-or fall back to another credential. Renewals currently have mocked HTTP coverage;
-live App minting has not been tested because no App credentials were provided.
-The separate successful private HTTPS clone/push/draft-PR test validates the static
-Git token and `gh` path; it does not validate App minting or expiry recovery.
+or fall back to another credential. Live Docker Desktop acceptance has exercised actual App token minting with a
+repository allowlist, private clone/commit/push/draft-PR creation, token renewal
+consumed by the existing worker and actual disposable-token revocation. The revoked
+token produced HTTP 401 and failed Git access; an explicitly requested new mint
+restored API/Git access without a Pod restart. The App private key and installation
+were not revoked. This qualifies real revocation/replacement, not elapsed-time
+expiry or automatic renewal triggered by a worker's 401. See the
+[local qualification evidence](local-parity-qualification.md) and
+[repeatable App harness](provider-acceptance.md#github-app-live-renewal).
 
 ## Reading updated tokens without restarting Pods
 

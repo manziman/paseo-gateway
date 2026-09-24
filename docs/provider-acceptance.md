@@ -72,25 +72,75 @@ Run API-key qualification as its own `codex-api-key` case. OpenCode requires a
 profile with the intended provider's explicit configuration and credentials; use
 `model` to select the configured provider/model if required.
 
+## Generated-invalid rejection and recovery
+
+`node --import tsx scripts/provider-failure-live.ts PRIVATE_CONFIG.json REPORT.json`
+uses an explicit context and namespace and creates one isolated project, profile,
+Secret, workspace, and PVC. The private config selects `provider` (`claude` or
+`opencode`), its matching `credentialEnv`, `tls`, and `identitySecret`. OpenCode
+also needs `providerConfigFile` and `model`. Set `invalidOnly: true` to create a
+random invalid credential without reading a valid one; restore checks are
+`skipped` because that mode does not select them. For full recovery, supply an explicitly authorized
+`validCredentialFile`. Keep config, report, and the separate cleanup inventory
+outside the repository.
+
+The generated credential must produce a bounded, visible authentication failure
+without a successful assistant reply. Pinned Paseo 0.9.1 may report this as an
+`idle` turn whose assistant message contains the authentication error; the
+harness records that exact surface instead of claiming a structured terminal
+error. Full recovery replaces only the fixture Secret with the existing valid
+credential, checks that the old Pod still rejects it, then suspends/resumes the
+workspace and requires a successful fresh agent with a new Pod UID and retained
+PVC. Finally it suspends the workspace and resets the fixture Secret to the
+generated invalid value. This proves invalid-credential rejection and
+invalid-to-existing-valid replacement recovery. Actual provider expiry/revocation
+and rotation between two independently valid keys are reported as `skipped`
+unless separately selected and tested; neither is implied by this result.
+
 ## GitHub App live renewal
 
-First run the existing private repository acceptance workflow with an App-backed
-profile. This establishes clone, commit, push and draft-PR behavior with an
-installation token. Select that **disposable running workspace** in a private
-configuration:
+Select a **disposable running workspace** using an App-backed profile in a private
+configuration. Create the workspace through the normal CLI/SDK with its configured
+TLS trust, then run the in-Pod Git/API harness:
 
 ```json
-{"context":"docker-desktop","namespace":"provider-acceptance","workspace":"SELECT_TEST_WORKSPACE","forceRenewal":true,"timeoutSeconds":240}
+{
+  "context": "docker-desktop",
+  "namespace": "provider-acceptance",
+  "workspace": "SELECT_TEST_WORKSPACE",
+  "forceRenewal": true,
+  "timeoutSeconds": 240,
+  "privateWrite": {"repository": "owner/disposable-repository"},
+  "revokeNewlyMintedToken": true,
+  "suspendAfter": true
+}
 ```
 
 Run `node --import tsx scripts/github-app-live.ts CONFIG.json REPORT.json`.
-It verifies the token's repository allowlist and Git access, advances the output
-Secret's renewal metadata, observes a different live-minted token reaching the
-same running Pod, and checks subsequent Git/gh calls without restart. The private
-key stays in the gateway. This is an actual mint/renew test, but **not an actual
-expiry test**: metadata is advanced before the provider's real expiry. The report
-keeps actual expiry/revocation and separate push/PR evidence explicitly blocked.
-Never present a mocked HTTP renewal or a static token test as App renewal evidence.
+Writes and revocation are disabled unless explicitly selected. `privateWrite`
+requires the selected repository to match both the profile allowlist and the
+workspace's HTTPS origin. It creates a unique branch, commits only a generated
+marker with the projected identity, pushes and opens a draft PR. Git hooks are
+disabled for these deterministic acceptance commands. Private branch/PR/resource
+identities go only into `REPORT.json.cleanup-private.json`, never public evidence.
+The PR remains draft and unmerged for operator inspection.
+
+The harness verifies repository scope and absence of the App private key and
+Kubernetes API token in the worker, requests early renewal, observes a different
+live-minted token reaching the same running Pod, and checks subsequent Git/gh calls
+without restart. Advancing expiry metadata is an actual mint/renew test, not an
+actual elapsed-time expiry test.
+
+When `revokeNewlyMintedToken` is selected, the harness requires the fixture to be
+the profile's sole running consumer. It revokes only the newly minted token using
+GitHub's [installation token revocation endpoint](https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token),
+requires HTTP 401 and failed Git access, requests a new mint and verifies recovery
+in the same Pod. It never deletes the App installation or revokes the App key.
+Recovery here follows an explicit renewal request; it does not establish automatic
+renewal triggered by a worker's 401. Actual elapsed-time expiry remains separately
+reported as skipped. Actual revocation plus successful renewal/replacement qualifies
+the selected rejection/recovery case without claiming elapsed-time expiry. Never present mocked HTTP renewal, synthetic invalid tokens
+or a static token test as evidence of real App renewal/revocation.
 
 ## Replacement, rejection and recovery procedures
 

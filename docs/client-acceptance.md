@@ -1,5 +1,7 @@
 # Pinned client acceptance matrix (pending)
 
+For a short operator-run desktop walkthrough, use the [manual desktop acceptance checklist](manual-desktop-acceptance.md).
+
 This matrix tracks [headless parity issue #16](https://github.com/manziman/paseo-gateway/issues/16)
 and the required unchanged v0.1 desktop flows in [issue #62](https://github.com/manziman/paseo-gateway/issues/62).
 The gateway pins the upstream CLI, SDK and wire protocol at 0.9.1. Fixture tests
@@ -42,7 +44,8 @@ when CLI fixture tests pass.
 
 ## Unchanged desktop and SDK checklist
 
-Use the released, unmodified v0.1 desktop app and pinned SDK. Connect directly to
+Use an unmodified desktop app and the pinned SDK. Record the desktop's exact
+version; a compatible newer desktop is valid versioned live evidence. Connect to
 the gateway through the deployment's protected access path. Record the displayed
 result and a redacted wire/result observation for each item. Repeat workspace
 flows across at least two isolated Pods and verify no cross-workspace routing.
@@ -57,7 +60,8 @@ flows across at least two isolated Pods and verify no cross-workspace routing.
 | `desktop.permission` | Observe pending permission and approve/deny in intended Pod; other role denied | Unchanged opaque permission ID and resolution |
 | `desktop.git-file` | Branch/PR checkout, list/read/write file, attachment upload and download | Correct Pod and workspace identity, binary integrity; provider-free Docker transfer evidence in `scripts/upstream-test.ts`, desktop observation still required |
 | `desktop.terminal` | Open/read/write/close terminal on two Pods, replace gateway, reconnect | Terminal slot identity, output order, no cross-Pod bytes |
-| `desktop.schedule` | Create/list/inspect/update/pause/resume/log/run once/delete where surfaced | Exact schedule payload and run history; #58 for existing-agent targets |
+| `desktop.schedule` | In the exposed Schedules screen, create/list/edit/pause/resume/run now/delete a new-agent schedule | Cadence/status/last-run display and exactly one created agent turn; run logs are CLI/SDK evidence |
+| `desktop.existing-agent-schedule` | With an operator-created existing-agent heartbeat on a Ready test agent, inspect its target label/status, edit its cron cadence, and delete it | The correct agent is shown as present; a false “Target gone” or “Agent unavailable” is FAIL. This remains an unresolved scoped-ID desktop parity gate. |
 | `sdk.directory` | Page beyond 200; filter; archived/suspended; inspect `lastError` | Full records, no duplicates/omissions, explicit unavailable state |
 | `sdk.reconnect` | Replace gateway and receive new full directory generation | All existing workspaces/agents visible after reconnect |
 | `sdk.ambiguous` | Drop response after create/prompt/file mutation, reconnect and inspect | No silent replay; unknown outcome reported where needed |
@@ -69,6 +73,13 @@ for the observations. An unexecuted scenario remains BLOCKED. Start with a local
 JSON object like `{ "desktop.connection": { "status": "BLOCKED" } }` and add
 `"kind": "live-desktop"` (or `"live-sdk"`) plus a nonempty `"evidence"` local
 reference when a scenario has passed. The script prints only IDs and status.
+`desktop.existing-agent-schedule` requires its own desktop observation; new-agent
+schedule or CLI/SDK evidence cannot satisfy it. The pinned 0.9.1 desktop joins
+schedule targets to directory agents by exact ID in
+[schedule derivation](https://github.com/getpaseo/paseo/blob/v0.9.1/packages/app/src/schedules/schedule-derivation.ts),
+while the gateway exposes reversible workspace-scoped agent IDs and the pinned
+schedule target schema requires a GUID. The installed 0.9.2 desktop bundle retains
+the same exact-ID lookup. This is a source-level finding pending manual UI evidence.
 
 Optional voice/plugins, host filesystem browsing, Hub/relay, host
 recycle/password/reboot operations, and active-active HA are not release gates

@@ -12,6 +12,7 @@ export const required = [
   "desktop.git-file",
   "desktop.terminal",
   "desktop.schedule",
+  "desktop.existing-agent-schedule",
   "sdk.directory",
   "sdk.reconnect",
   "sdk.ambiguous",
