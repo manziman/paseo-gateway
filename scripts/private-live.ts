@@ -158,7 +158,9 @@ try {
   console.log(`Orchestrator started: ${orchestrator.id}`);
   const orchestratorResult = await active.waitForFinish(orchestrator.id, 480000);
   assert.equal(orchestratorResult.status, "idle", "Orchestrator must finish without error");
-  const inventory = await active.fetchAgents({ filter: { labels: { acceptance: suffix } } });
+  const inventory = await active.fetchAgents({
+    filter: { projectKeys: [projectId], labels: { acceptance: suffix } },
+  });
   assert.equal(inventory.entries.length, 1, "Orchestrator must create exactly one labeled worker");
   const worker = inventory.entries[0]?.agent;
   assert.ok(worker);
@@ -212,13 +214,15 @@ try {
   }, "scheduled run and archive");
   assert.ok(run.workspaceId && run.agentId);
   const archivedAgentId = scopedId(run.workspaceId, run.agentId);
-  const archivedInventory = await active.fetchAgents({ filter: { includeArchived: true } });
+  const archivedInventory = await active.fetchAgents({
+    filter: { projectKeys: [projectId], includeArchived: true },
+  });
   assert.ok(
     archivedInventory.entries.some((entry) => entry.agent.id === archivedAgentId),
     "Archived scheduled agent remains listed",
   );
   const scheduledWorkers = await active.fetchAgents({
-    filter: { labels: { acceptance: `scheduled-${suffix}` } },
+    filter: { projectKeys: [projectId], labels: { acceptance: `scheduled-${suffix}` } },
   });
   assert.equal(scheduledWorkers.entries.length, 1, "Scheduled orchestrator must create one worker");
   const scheduledWorker = scheduledWorkers.entries[0]?.agent;
