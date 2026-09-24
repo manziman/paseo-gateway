@@ -1,5 +1,11 @@
-import type { V1PersistentVolumeClaim, V1Pod, V1Secret, V1Service } from "@kubernetes/client-node";
-import type { Project, Workspace, WorkspaceStatus } from "../domain.js";
+import type {
+  V1ConfigMap,
+  V1PersistentVolumeClaim,
+  V1Pod,
+  V1Secret,
+  V1Service,
+} from "@kubernetes/client-node";
+import type { CredentialProfile, Project, Workspace, WorkspaceStatus } from "../domain.js";
 
 export type Infrastructure = V1Pod | V1Service | V1PersistentVolumeClaim;
 export type InfrastructureKind = "Pod" | "Service" | "PersistentVolumeClaim";
@@ -15,6 +21,12 @@ export interface Store {
   create(object: Infrastructure): Promise<void>;
   deletePod(name: string, uid: string): Promise<void>;
   secret(name: string): Promise<V1Secret>;
+  credentialProfile(name: string): Promise<CredentialProfile | undefined>;
+  configMap(name: string): Promise<V1ConfigMap>;
+  teardown(workspace: Workspace): Promise<void>;
+  deleteStorage(name: string, uid: string): Promise<void>;
+  /** Remove owned terminal workspace Service/access Secret; true only after both are absent. */
+  deleteRuntime(workspace: Workspace): Promise<boolean>;
 }
 
 export function statusCode(error: unknown): number | undefined {

@@ -22,6 +22,11 @@
     "dev:up": "bash scripts/dev-up.sh",
     "dev:connect": "bash scripts/connect.sh",
     "test:live": "node --import tsx scripts/live-test.ts",
+    "test:private": "node --import tsx scripts/private-live.ts",
+    "test:lifecycle": "node --import tsx scripts/lifecycle-live.ts",
+    "test:auth": "node --import tsx scripts/auth-live.ts",
+    "test:checkout": "node --import tsx scripts/checkout-live.ts",
+    "test:cli": "node --import tsx scripts/cli-test.ts",
     "generate:crds": "node --import tsx scripts/generate-crds.ts",
     "credentials": "node --import tsx scripts/credentials.ts",
     "test:upstream": "node --import tsx scripts/upstream-test.ts"
@@ -31,9 +36,10 @@
     "url": "https://github.com/manziman/paseo-gateway.git"
   },
   "dependencies": {
-    "@getpaseo/client": "0.7.1",
-    "@getpaseo/protocol": "0.7.1",
+    "@getpaseo/client": "0.9.1",
+    "@getpaseo/protocol": "0.9.1",
     "@kubernetes/client-node": "2.0.0",
+    "cron-parser": "5.10.1",
     "ws": "8.21.3",
     "zod": "4.4.3"
   },

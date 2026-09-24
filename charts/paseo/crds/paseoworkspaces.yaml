@@ -67,12 +67,45 @@
                     "default": "HEAD",
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 200
+                    "maxLength": 200,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]*$"
                   },
                   "branch": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 200
+                    "maxLength": 200,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
+                  },
+                  "fetchDepth": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100000
+                  },
+                  "pullRequest": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "exclusiveMinimum": true,
+                    "maximum": 9007199254740991
+                  },
+                  "retentionPolicy": {
+                    "type": "object",
+                    "properties": {
+                      "storage": {
+                        "type": "string",
+                        "enum": [
+                          "Retain",
+                          "Ephemeral"
+                        ]
+                      },
+                      "ttlAfterArchivedSeconds": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 31536000
+                      }
+                    },
+                    "required": [
+                      "storage"
+                    ]
                   }
                 },
                 "required": [
@@ -84,8 +117,16 @@
                 ],
                 "x-kubernetes-validations": [
                   {
+                    "rule": "oldSelf.residency != 'Archived' || self.residency == 'Archived'",
+                    "message": "Archived workspaces cannot be restored; create a new workspace"
+                  },
+                  {
                     "rule": "self.projectRef == oldSelf.projectRef",
                     "message": "projectRef is immutable"
+                  },
+                  {
+                    "rule": "(has(self.retentionPolicy) ? self.retentionPolicy.storage : 'Retain') == (has(oldSelf.retentionPolicy) ? oldSelf.retentionPolicy.storage : 'Retain')",
+                    "message": "Storage class cannot change after workspace creation"
                   },
                   {
                     "rule": "self.credentialProfile == oldSelf.credentialProfile",
@@ -94,6 +135,22 @@
                   {
                     "rule": "self.revision == oldSelf.revision",
                     "message": "revision is immutable"
+                  },
+                  {
+                    "rule": "has(self.fetchDepth) == has(oldSelf.fetchDepth)",
+                    "message": "fetchDepth presence is immutable"
+                  },
+                  {
+                    "rule": "!has(self.fetchDepth) || self.fetchDepth == oldSelf.fetchDepth",
+                    "message": "fetchDepth is immutable"
+                  },
+                  {
+                    "rule": "has(self.pullRequest) == has(oldSelf.pullRequest)",
+                    "message": "pullRequest presence is immutable"
+                  },
+                  {
+                    "rule": "!has(self.pullRequest) || self.pullRequest == oldSelf.pullRequest",
+                    "message": "pullRequest is immutable"
                   },
                   {
                     "rule": "has(self.branch) == has(oldSelf.branch)",
@@ -128,6 +185,34 @@
                   },
                   "pvcName": {
                     "type": "string"
+                  },
+                  "archivedAt": {
+                    "type": "string"
+                  },
+                  "teardownCompletedAt": {
+                    "type": "string"
+                  },
+                  "storageDeletedAt": {
+                    "type": "string"
+                  },
+                  "lastFailure": {
+                    "type": "object",
+                    "properties": {
+                      "reason": {
+                        "type": "string"
+                      },
+                      "message": {
+                        "type": "string"
+                      },
+                      "at": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "reason",
+                      "message",
+                      "at"
+                    ]
                   },
                   "backendWorkspaceId": {
                     "type": "string"

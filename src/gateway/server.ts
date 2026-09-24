@@ -1,7 +1,20 @@
-import { createHash, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer } from "node:http";
 import { WSInboundMessageSchema } from "@getpaseo/protocol/messages";
 import { WebSocket, WebSocketServer } from "ws";
+import type { Workspace } from "../domain.js";
+import {
+  type GatewayPrincipal,
+  principalIsActive,
+  type ScopedAuthOptions,
+  validateScopedAuth,
+} from "./auth.js";
+import { allowedRequest, authenticateRequest, handleTokenRequest } from "./auth-http.js";
+import { handleDiagnostics } from "./diagnostics-http.js";
+import { gatewayRuntime } from "./runtime-status.js";
+import { buildServerInfo, type ServerInfoConfig } from "./server-info.js";
+
+export { authorized } from "./auth.js";
+
 import { DirectoryGeneration } from "./catalog.js";
 import { GatewaySession, type SessionOptions } from "./session.js";
 
@@ -13,37 +26,43 @@ export interface ServerOptions
   serverId: string;
   allowedHosts: string[];
   ready: () => Promise<boolean>;
-}
-
-/** Match Paseo's direct connection bearer mechanisms, including browser WebSocket subprotocol auth. */
-export function authorized(request: Pick<IncomingMessage, "headers">, password: string): boolean {
-  const header = request.headers.authorization;
-  const protocols =
-    request.headers["sec-websocket-protocol"]?.split(",").map((p) => p.trim()) ?? [];
-  const token = header?.startsWith("Bearer ")
-    ? header.slice(7)
-    : protocols.find((p) => p.startsWith("paseo.bearer."))?.slice(13);
-  if (!token) return false;
-  return timingSafeEqual(
-    createHash("sha256").update(token).digest(),
-    createHash("sha256").update(password).digest(),
-  );
+  scopedAuth?: ScopedAuthOptions;
+  advertised?: ServerInfoConfig;
+  workspaceLogs?: (workspace: Workspace, tail: number) => Promise<string>;
 }
 
 export async function startGateway(options: ServerOptions) {
+  const runtime = gatewayRuntime(options.serverId, `${options.host}:${options.port}`);
+  buildServerInfo(options.serverId, options.advertised);
+  if (options.scopedAuth) {
+    validateScopedAuth(options.scopedAuth);
+    if (
+      options.scopedAuth.signingKey === options.password ||
+      options.scopedAuth.signingKey === options.backendPassword
+    )
+      throw new Error("Scoped signing key must be separate from owner and backend credentials");
+  }
+  const principals = new WeakMap<WebSocket, GatewayPrincipal>();
   const directory = new DirectoryGeneration();
   const sessions = new Set<GatewaySession>();
   const server = createServer(async (request, response) => {
-    if (request.url === "/healthz") {
-      response.writeHead(200).end("ok\n");
-      return;
+    try {
+      if (request.url === "/healthz") {
+        response.writeHead(200).end("ok\n");
+        return;
+      }
+      if (request.url === "/readyz") {
+        const ready = await options.ready().catch(() => false);
+        response.writeHead(ready ? 200 : 503).end(ready ? "ready\n" : "unavailable\n");
+        return;
+      }
+      if (await handleTokenRequest(request, response, options)) return;
+      if (await handleDiagnostics(request, response, options)) return;
+      response.writeHead(404).end();
+    } catch {
+      if (!response.headersSent) response.writeHead(503);
+      response.end();
     }
-    if (request.url === "/readyz") {
-      const ready = await options.ready().catch(() => false);
-      response.writeHead(ready ? 200 : 503).end(ready ? "ready\n" : "unavailable\n");
-      return;
-    }
-    response.writeHead(404).end();
   });
   const wss = new WebSocketServer({
     noServer: true,
@@ -53,32 +72,47 @@ export async function startGateway(options: ServerOptions) {
       [...protocols].find((p) => p.startsWith("paseo.bearer.")) ?? false,
   });
   server.on("upgrade", (request, socket, head) => {
-    const host = (request.headers.host ?? "").split(":")[0] ?? "";
-    const origin = request.headers.origin;
-    let originAllowed = !origin;
-    try {
-      if (origin) originAllowed = options.allowedHosts.includes(new URL(origin).hostname);
-    } catch {
-      originAllowed = false;
-    }
-    if (
-      request.url !== "/ws" ||
-      !options.allowedHosts.includes(host) ||
-      !originAllowed ||
-      !authorized(request, options.password)
-    ) {
-      socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-      return;
-    }
-    wss.handleUpgrade(request, socket, head, (ws) => wss.emit("connection", ws));
+    void (async () => {
+      if (request.url !== "/ws" || !allowedRequest(request, options.allowedHosts)) {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      const principal = await authenticateRequest(
+        request,
+        options.password,
+        options.store,
+        options.scopedAuth,
+      );
+      if (!principal) {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        principals.set(ws, principal);
+        wss.emit("connection", ws);
+      });
+    })().catch(() => socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"));
   });
   wss.on("connection", (ws: WebSocket) => {
+    const principal = principals.get(ws);
+    if (!principal) {
+      ws.close(1008, "Authentication required");
+      return;
+    }
+    const expired = () =>
+      principal.kind === "workspace" &&
+      (principal.expiresAt <= Math.floor(Date.now() / 1000) ||
+        !!options.scopedAuth?.revokedTokenIds?.has(principal.tokenId));
     let session: GatewaySession | undefined;
     let lastActivity = Date.now();
     let lease = false;
     let inflight = 0;
     const requestIds = new Set<string>();
     const send = (data: string | Uint8Array) => {
+      if (expired()) {
+        ws.close(1008, "Credential expired or revoked");
+        return;
+      }
       if (ws.readyState !== WebSocket.OPEN) return;
       if (ws.bufferedAmount + Buffer.byteLength(data) > 8 * 1024 * 1024) {
         ws.terminate();
@@ -88,13 +122,28 @@ export async function startGateway(options: ServerOptions) {
     };
     const helloDeadline = setTimeout(() => ws.close(1008, "Hello required"), 10000);
     const timer = setInterval(() => {
+      if (expired()) {
+        ws.close(1008, "Credential expired or revoked");
+        return;
+      }
       if (lease && Date.now() - lastActivity > 45000) ws.terminate();
+      if (principal.kind === "workspace")
+        void options.store
+          .workspaces()
+          .then((rows) => {
+            if (!principalIsActive(principal, rows)) ws.close(1008, "Credential revoked");
+          })
+          .catch(() => ws.close(1013, "Authorization state unavailable"));
       void session?.refreshDirectory().catch(() => {});
     }, 10000);
     ws.on("error", () => {
       /* close handles cleanup; never log frames or credentials */
     });
     ws.on("message", (data, binary) => {
+      if (expired()) {
+        ws.close(1008, "Credential expired or revoked");
+        return;
+      }
       lastActivity = Date.now();
       if (binary) {
         if (!session) {
@@ -131,7 +180,9 @@ export async function startGateway(options: ServerOptions) {
         clearTimeout(helloDeadline);
         session = new GatewaySession({
           ...options,
+          runtime,
           directory,
+          principal,
           hello: envelope,
           emit: (message) => send(JSON.stringify({ type: "session", message })),
           emitBinary: send,
@@ -144,30 +195,12 @@ export async function startGateway(options: ServerOptions) {
             type: "session",
             message: {
               type: "status",
-              payload: {
-                status: "server_info",
-                serverId: options.serverId,
-                hostname: "Paseo Gateway (independent)",
-                version: "0.7.1",
-                permissions: [
-                  "daemon.read",
-                  "workspace.read",
-                  "workspace.write",
-                  "workspace.manage",
-                ],
-                capabilities: {
-                  voice: {
-                    dictation: { enabled: false, reason: "Not supported" },
-                    voice: { enabled: false, reason: "Not supported" },
-                  },
-                },
-                features: {
-                  providersSnapshot: true,
-                  providersSnapshotCwd: true,
-                  directorySync: true,
-                  workspaceLabels: false,
-                },
-              },
+              payload: buildServerInfo(
+                options.serverId,
+                options.advertised,
+                principal,
+                options.operations?.creationLifecycle,
+              ),
             },
           }),
         );

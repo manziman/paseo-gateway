@@ -52,14 +52,17 @@ kubectl --context docker-desktop -n paseo-system patch paseoworkspaces.paseo-gat
   --type merge -p '{"spec":{"residency":"Running"}}'
 ```
 
-Archive through the desktop or set residency to `Archived`. Both stop compute
-and retain the record and PVC. Explicitly deleting a workspace record also
-retains its PVC; its Pod/Service are garbage-collected. Record the old PVC name
+Archive through the desktop or set residency to `Archived`. Both run teardown and
+stop compute. The default retains the record and PVC; an explicit storage TTL
+allows the controller to collect the PVC after archival. Explicitly deleting a
+workspace record retains its PVC; its Pod, Service and access Secret are
+garbage-collected. Record the old PVC name
 and back up data before deleting records. Automatic adoption/restoration of an
 orphan PVC is not implemented. A newly created record gets a new volume.
 
-Deleting a PVC or namespace can destroy retained storage. The controller does
-neither. Helm uninstall retains CRDs, custom records, manually provisioned
+Deleting a PVC or namespace can destroy retained storage. The controller deletes
+only owned PVCs whose configured archive retention deadline has expired; it never
+deletes namespaces. Helm uninstall retains CRDs, custom records, manually provisioned
 Secrets and PVCs, but also stops reconciliation; suspend workspaces before
 uninstalling to stop their compute. Local development does not include a
 destructive `down` command.
@@ -155,3 +158,40 @@ liveness restarts.
 Back up custom resources, identity/profile Secrets and workspace data together.
 Treat those backups as sensitive. Restoring only volumes does not restore the
 cluster host identity or project/workspace catalog.
+
+### Interrupted teardown recovery
+
+Archive is terminal. The workspace teardown helper persists
+`$HOME/.paseo/gateway-teardown-started` with an exclusive create and flushes it
+before executing repository hooks. It persists `gateway-teardown-complete` after
+successful hooks. Concurrent callers and subsequent reconciliations cannot replay
+an unfinished intent, including after a nonzero hook exit: earlier commands may
+already have taken effect. Hook output is suppressed and is never copied into
+workspace status or gateway logs.
+
+If teardown reports failure/unknown outcome, retain compute and storage and
+inspect the hook's external side effects first. Stop concurrent archive attempts
+while recovering. An operator who has established that retrying is safe may remove
+only `gateway-teardown-started` and any incomplete
+`gateway-teardown-complete.tmp` from the workspace's persisted `.paseo` directory,
+then explicitly retry archive. Do not remove an existing completion marker or
+manually mark completion without verifying all cleanup obligations. The gateway
+does not perform this acknowledgment automatically. Do not restore an Archived
+workspace; create another workspace with its own lifecycle instead.
+
+### Terminal workspace resource cleanup
+
+Once an Archived workspace's pod is actually absent, the controller removes its
+owned Service and scoped access Secret, even if the retained PVC has no expiration.
+It verifies workspace ownership labels and uses the observed resource UID as a
+Kubernetes deletion precondition. Shared backend/provider Secrets are never part
+of this cleanup. Suspended workspaces keep their runtime resources for resume.
+
+PVC retention starts after compute has stopped. A deletion request is not evidence
+that a PVC is gone: while finalizers keep it present, the controller retains agent
+inventory and creation receipts and reports that deletion is pending. Only observed
+absence permits metadata purge and `storageDeletedAt`. Foreign ownership or a UID
+conflict refuses cleanup. Workspace CRs remain as lifecycle records after storage
+expiration; their count is not bounded by schedule run-history retention. Operators
+may remove terminal CRs according to their own metadata retention policy after
+verifying cleanup; automatic CR garbage collection is a separate capability.

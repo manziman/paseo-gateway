@@ -42,7 +42,10 @@ describe("workspace lifecycle", () => {
       store.workspaceRows = [row];
       const controller = new WorkspaceController(store, config);
       await controller.reconcile(row, store.projectRows);
+      const pod = store.objects.get(`Pod/${resourceName(row)}`) as V1Pod;
+      pod.status = { conditions: [{ type: "Ready", status: "True" }] };
       row.spec.residency = state;
+      await controller.reconcile(row, store.projectRows);
       await controller.reconcile(row, store.projectRows);
       await controller.reconcile(row, store.projectRows);
       expect(store.objects.has(`Pod/${resourceName(row)}`)).toBe(false);

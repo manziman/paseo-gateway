@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import type { V1PersistentVolumeClaim, V1Pod, V1Service } from "@kubernetes/client-node";
+import { credentialProjection } from "../credentials/projection.js";
 import {
+  API_GROUP,
   API_VERSION,
+  type CredentialProfile,
   MANAGED_BY,
   type Project,
   WORKSPACE_UID_LABEL,
@@ -11,10 +14,12 @@ import {
 
 export interface RuntimeConfig {
   workspaceImage: string;
+  referenceCacheAvailable?: boolean;
   storageClass?: string;
   storageSize: string;
   backendSecret: string;
   imagePullPolicy: "Always" | "IfNotPresent" | "Never";
+  gatewayUrl?: string;
 }
 
 export function resourceName(workspace: Workspace): string {
@@ -25,13 +30,34 @@ export function resourceName(workspace: Workspace): string {
 }
 
 /** Resources are deterministic; PVCs deliberately have no owner reference so deletion retains data. */
-export function desiredResources(workspace: Workspace, project: Project, config: RuntimeConfig) {
+export function desiredResources(
+  workspace: Workspace,
+  project: Project,
+  config: RuntimeConfig,
+  profile?: CredentialProfile,
+) {
+  const referenceCache = config.referenceCacheAvailable !== false ? project.spec.cache : undefined;
+  const credentials = credentialProjection(workspace, project, profile);
+  const image =
+    project.spec.runtime?.image ?? profile?.spec.runtime?.image ?? config.workspaceImage;
+  const resourceOverrides = {
+    requests: {
+      ...profile?.spec.runtime?.resources?.requests,
+      ...project.spec.runtime?.resources?.requests,
+    },
+    limits: {
+      ...profile?.spec.runtime?.resources?.limits,
+      ...project.spec.runtime?.resources?.limits,
+    },
+  };
   if (!workspace.metadata.uid) throw new Error("Workspace must have a Kubernetes UID");
   const name = resourceName(workspace);
   const labels = {
     "app.kubernetes.io/managed-by": MANAGED_BY,
     "app.kubernetes.io/component": "workspace",
     [WORKSPACE_UID_LABEL]: workspace.metadata.uid,
+    "paseo-gateway.manziman.github.io/credential-profile": workspace.spec.credentialProfile,
+    [`${API_GROUP}/project`]: workspace.spec.projectRef,
   };
   const metadata = { name, namespace: workspace.metadata.namespace, labels };
   const ownerReferences = [
@@ -85,10 +111,14 @@ export function desiredResources(workspace: Workspace, project: Project, config:
       initContainers: [
         {
           name: "checkout",
-          image: config.workspaceImage,
+          image,
           imagePullPolicy: config.imagePullPolicy,
           command: ["node", "/opt/paseo/initialize.mjs"],
           env: [
+            ...credentials.env,
+            { name: "HOME", value: "/data/home" },
+            { name: "FETCH_DEPTH", value: String(workspace.spec.fetchDepth ?? 1) },
+            { name: "PULL_REQUEST", value: String(workspace.spec.pullRequest ?? "") },
             { name: "REPOSITORY", value: project.spec.repository },
             { name: "REVISION", value: workspace.spec.revision },
             { name: "BRANCH", value: workspace.spec.branch ?? "" },
@@ -99,6 +129,17 @@ export function desiredResources(workspace: Workspace, project: Project, config:
             limits: { cpu: "1", memory: "512Mi" },
           },
           volumeMounts: [
+            ...credentials.checkoutMounts,
+            ...(referenceCache
+              ? [
+                  {
+                    name: "reference-cache",
+                    mountPath: "/reference/git",
+                    readOnly: true,
+                    ...(referenceCache.subPath ? { subPath: referenceCache.subPath } : {}),
+                  },
+                ]
+              : []),
             { name: "data", mountPath: "/data" },
             { name: "tmp", mountPath: "/tmp" },
           ],
@@ -107,11 +148,12 @@ export function desiredResources(workspace: Workspace, project: Project, config:
       containers: [
         {
           name: "daemon",
-          image: config.workspaceImage,
+          image,
           imagePullPolicy: config.imagePullPolicy,
           workingDir: workspacePath(workspace.metadata.name),
           securityContext,
           env: [
+            ...credentials.env,
             { name: "HOME", value: "/home/paseo" },
             { name: "PASEO_HOME", value: "/home/paseo/.paseo" },
             { name: "PASEO_LISTEN", value: "0.0.0.0:6767" },
@@ -123,20 +165,17 @@ export function desiredResources(workspace: Workspace, project: Project, config:
               name: "PASEO_PASSWORD",
               valueFrom: { secretKeyRef: { name: config.backendSecret, key: "password" } },
             },
-            {
-              name: "CLAUDE_CODE_OAUTH_TOKEN",
-              valueFrom: { secretKeyRef: { name: workspace.spec.credentialProfile, key: "token" } },
-            },
           ],
           ports: [{ name: "daemon", containerPort: 6767 }],
           startupProbe: { tcpSocket: { port: "daemon" }, periodSeconds: 5, failureThreshold: 60 },
           readinessProbe: { tcpSocket: { port: "daemon" }, periodSeconds: 5 },
           livenessProbe: { tcpSocket: { port: "daemon" }, periodSeconds: 20, failureThreshold: 3 },
           resources: {
-            requests: { cpu: "250m", memory: "512Mi" },
-            limits: { cpu: "2", memory: "2Gi" },
+            requests: { cpu: "250m", memory: "512Mi", ...resourceOverrides.requests },
+            limits: { cpu: "2", memory: "2Gi", ...resourceOverrides.limits },
           },
           volumeMounts: [
+            ...credentials.daemonMounts,
             { name: "data", mountPath: "/home/paseo", subPath: "home" },
             {
               name: "data",
@@ -148,10 +187,42 @@ export function desiredResources(workspace: Workspace, project: Project, config:
         },
       ],
       volumes: [
-        { name: "data", persistentVolumeClaim: { claimName: name } },
+        ...credentials.volumes,
+        ...(referenceCache
+          ? [
+              {
+                name: "reference-cache",
+                persistentVolumeClaim: { claimName: referenceCache.claimName, readOnly: true },
+              },
+            ]
+          : []),
+        workspace.spec.retentionPolicy?.storage === "Ephemeral"
+          ? { name: "data", emptyDir: { sizeLimit: config.storageSize } }
+          : { name: "data", persistentVolumeClaim: { claimName: name } },
         { name: "tmp", emptyDir: { sizeLimit: "512Mi" } },
       ],
     },
   };
+  if (config.gatewayUrl && pod.spec) {
+    const daemon = pod.spec.containers[0];
+    if (daemon) {
+      daemon.env?.push(
+        { name: "PATH", value: "/opt/paseo/bin:/usr/local/bin:/usr/bin:/bin" },
+        { name: "PASEO_GATEWAY_URL", value: config.gatewayUrl },
+        { name: "PASEO_GATEWAY_TOKEN_FILE", value: "/run/paseo-gateway/token" },
+        { name: "PASEO_CLUSTER_WORKSPACE_ID", value: workspace.metadata.name },
+        { name: "PASEO_CLUSTER_PROJECT_ID", value: workspace.spec.projectRef },
+      );
+      daemon.volumeMounts?.push({
+        name: "gateway-access",
+        mountPath: "/run/paseo-gateway",
+        readOnly: true,
+      });
+      pod.spec.volumes?.push({
+        name: "gateway-access",
+        secret: { secretName: `${name}-access`, defaultMode: 0o440 },
+      });
+    }
+  }
   return { pvc, service, pod };
 }

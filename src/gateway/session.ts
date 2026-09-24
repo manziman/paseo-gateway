@@ -5,9 +5,12 @@ import {
   encodeTerminalStreamFrame,
 } from "@getpaseo/protocol/binary-frames/index";
 import {
+  type AgentSnapshotPayload,
+  AgentSnapshotPayloadSchema,
   type SessionInboundMessage,
   SessionInboundMessageSchema,
   type SessionOutboundMessage,
+  SessionOutboundMessageSchema,
   type WorkspaceDescriptorPayload,
   type WSHelloMessage,
 } from "@getpaseo/protocol/messages";
@@ -20,13 +23,30 @@ import {
   type Workspace,
   workspacePath,
 } from "../domain.js";
+import type { RecordStore } from "../kubernetes/records.js";
 import type { Store } from "../kubernetes/store.js";
+import { readArchivedInventory } from "./agent-inventory.js";
+import {
+  authorizeProject,
+  authorizeWorkspace,
+  type GatewayPrincipal,
+  principalIsActive,
+} from "./auth.js";
 import { type Backend, PaseoBackend } from "./backend.js";
-import { type DirectoryGeneration, projectDescriptor, workspaceDescriptor } from "./catalog.js";
+import {
+  type DirectoryGeneration,
+  DirectoryPages,
+  projectDescriptor,
+  sortAgents,
+  sortWorkspaces,
+  workspaceDescriptor,
+} from "./catalog.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
+import type { GatewayRuntime } from "./runtime-status.js";
 
 const forwarded = new Set([
   "create_agent_request",
+  "agent.create.request",
   "fetch_agent_request",
   "send_agent_message_request",
   "cancel_agent_request",
@@ -74,10 +94,22 @@ const providerRequests = new Set([
   "list_provider_modes_request",
   "list_provider_features_request",
   "provider_diagnostic_request",
-  "provider_usage_list_request",
+  "provider.usage.list.request",
 ]);
 
 export interface SessionOptions {
+  runtime?: GatewayRuntime;
+  inventoryStore?: RecordStore;
+  principal?: GatewayPrincipal;
+  operations?: {
+    creationLifecycle?: boolean;
+    close?(emit: SessionOptions["emit"]): void;
+    handle(
+      message: SessionInboundMessage,
+      emit: SessionOptions["emit"],
+      principal: GatewayPrincipal,
+    ): Promise<boolean>;
+  };
   store: Store;
   namespace: string;
   backendPassword: string;
@@ -101,6 +133,7 @@ export class GatewaySession {
     Promise<{ backend: Backend; workspace: Workspace; localId: string }>
   >();
   private readonly slots = new TerminalSlots();
+  private readonly pages = new DirectoryPages();
   private readonly uploads = new Map<string, string>();
   private readonly subscriptions = new Map<string, string>();
   private closed = false;
@@ -111,6 +144,8 @@ export class GatewaySession {
   constructor(private readonly options: SessionOptions) {}
 
   private async connection(workspace: Workspace) {
+    if (!authorizeWorkspace(this.options.principal ?? { kind: "owner" }, workspace))
+      throw new Error("Workspace access denied");
     const id = workspace.metadata.name;
     const previous = this.connections.get(id);
     if (previous) return previous;
@@ -178,7 +213,7 @@ export class GatewaySession {
         const snapshot = await backend.request({
           type: "fetch_workspaces_request",
           requestId: randomUUID(),
-          subscribe: { subscriptionId: randomUUID() },
+          subscribe: {},
           page: { limit: 200 },
         });
         if (snapshot.type !== "fetch_workspaces_response")
@@ -201,7 +236,20 @@ export class GatewaySession {
       this.options.store.projects(),
       this.options.store.workspaces(),
     ]);
-    return { projects, workspaces: workspaces.filter((w) => !w.metadata.deletionTimestamp) };
+    const principal = this.options.principal ?? { kind: "owner" };
+    if (!principalIsActive(principal, workspaces))
+      throw new Error("Workspace credential expired or revoked");
+    return {
+      projects: projects.filter(
+        (project) =>
+          authorizeProject(principal, project.metadata.name) &&
+          (principal.kind === "owner" ||
+            principal.credentialProfiles.includes(project.spec.credentialProfile)),
+      ),
+      workspaces: workspaces.filter(
+        (w) => !w.metadata.deletionTimestamp && authorizeWorkspace(principal, w),
+      ),
+    };
   }
 
   private projectFor(workspace: Workspace, projects: Project[]) {
@@ -234,7 +282,80 @@ export class GatewaySession {
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : "";
     const { projects, workspaces } = await this.records();
+    if (
+      await this.options.operations?.handle(
+        message,
+        this.options.emit,
+        this.options.principal ?? { kind: "owner" },
+      )
+    )
+      return;
     const active = workspaces.filter((w) => w.spec.residency !== "Archived");
+    if (message.type === "daemon.get_status.request") {
+      if (!this.options.runtime) throw new Error("Gateway runtime status is unavailable");
+      const providers = new Map<
+        string,
+        { provider: string; available: boolean; error: string | null }
+      >();
+      let providersComplete = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const observed = Promise.all(
+        active
+          .filter(
+            (workspace) =>
+              workspace.spec.residency === "Running" && workspace.status?.phase === "Ready",
+          )
+          .map(async (workspace) => {
+            try {
+              const { backend } = await this.connection(workspace);
+              const snapshot = await backend.request({
+                type: "get_providers_snapshot_request",
+                requestId: randomUUID(),
+                cwd: workspacePath(workspace.metadata.name),
+              });
+              if (snapshot.type !== "get_providers_snapshot_response")
+                throw new Error("Provider snapshot unavailable");
+              for (const entry of snapshot.payload.entries) {
+                const available = entry.status === "ready" && entry.enabled;
+                const previous = providers.get(entry.provider);
+                providers.set(entry.provider, {
+                  provider: entry.provider,
+                  available: available || !!previous?.available,
+                  error: available || previous?.available ? null : `Provider ${entry.status}`,
+                });
+              }
+            } catch {
+              providersComplete = false;
+            }
+          }),
+      );
+      // The upstream CLI probes status with a 1.5-second deadline; slow workspaces
+      // must not make a responsive gateway look down. Partial catalogs are explicit.
+      await Promise.race([
+        observed,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(() => {
+            providersComplete = false;
+            resolve();
+          }, 500);
+        }),
+      ]);
+      clearTimeout(timer);
+      this.options.emit({
+        type: "daemon.get_status.response",
+        payload: {
+          ...this.options.runtime,
+          requestId,
+          relay: null,
+          providers: [...providers.values()],
+          providersComplete,
+          implementation: "paseo-gateway",
+          protocolVersion: "0.9.1",
+          workspaceCount: workspaces.length,
+        },
+      });
+      return;
+    }
     if (message.type === "project.list.request") {
       this.options.emit({
         type: "project.list.response",
@@ -251,8 +372,24 @@ export class GatewaySession {
     }
     if (message.type === "fetch_workspaces_request") {
       this.watchingWorkspaces ||= !!message.subscribe;
-      if (message.page?.cursor)
-        throw new Error("Workspace cursor expired; request a full snapshot");
+      const pageKey = JSON.stringify({
+        type: message.type,
+        filter: message.filter,
+        sort: message.sort,
+      });
+      if (message.page?.cursor) {
+        this.options.emit({
+          type: "fetch_workspaces_response",
+          payload: {
+            requestId,
+            ...this.pages.read(pageKey, message.page),
+            emptyProjects: [],
+            subscriptionId: message.subscribe?.subscriptionId ?? null,
+            sync: this.options.directory.snapshot(message.sync?.generation),
+          },
+        });
+        return;
+      }
       await Promise.all(
         active
           .filter((w) => w.spec.residency === "Running" && w.status?.phase === "Ready")
@@ -270,20 +407,20 @@ export class GatewaySession {
         }));
       if (message.filter?.query) {
         const q = message.filter.query.toLowerCase();
-        rows = rows.filter((w) => w.name.toLowerCase().includes(q));
+        rows = rows.filter(
+          (w) => w.name.toLowerCase().includes(q) || w.id.toLowerCase().includes(q),
+        );
       }
-      if (rows.length > (message.page?.limit ?? 200))
-        throw new Error("POC workspace page limit exceeded; narrow the filter");
+      sortWorkspaces(rows, message.sort);
       this.options.emit({
         type: "fetch_workspaces_response",
         payload: {
           requestId,
-          entries: rows,
+          ...this.pages.read(pageKey, message.page, rows),
           emptyProjects: projects
             .filter((p) => !active.some((w) => w.spec.projectRef === p.metadata.name))
             .map(projectDescriptor),
           subscriptionId: message.subscribe?.subscriptionId ?? null,
-          pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
           sync: this.options.directory.snapshot(message.sync?.generation),
         },
       });
@@ -360,13 +497,48 @@ export class GatewaySession {
       return;
     }
     if (message.type === "fetch_agents_request" || message.type === "fetch_agent_history_request") {
-      if (message.page?.cursor) throw new Error("Agent cursor expired; request a full snapshot");
-      const entries: unknown[] = [];
-      for (const workspace of active.filter(
+      const pageKey = JSON.stringify({
+        type: message.type,
+        filter: message.filter,
+        sort: message.sort,
+        scope: "scope" in message ? message.scope : undefined,
+        search: "search" in message ? message.search : undefined,
+      });
+      if (message.page?.cursor) {
+        this.options.emit({
+          type:
+            message.type === "fetch_agents_request"
+              ? "fetch_agents_response"
+              : "fetch_agent_history_response",
+          payload: {
+            requestId,
+            ...this.pages.read(pageKey, message.page),
+            ...(message.type === "fetch_agents_request"
+              ? {
+                  subscriptionId: message.subscribe?.subscriptionId ?? null,
+                  sync: this.options.directory.snapshot(message.sync?.generation),
+                }
+              : {}),
+          },
+        });
+        return;
+      }
+      const entries: { agent: AgentSnapshotPayload }[] = [];
+      const inventory = message.filter?.includeArchived ? workspaces : active;
+      for (const workspace of inventory.filter(
         (w) =>
           !message.filter?.projectKeys?.length ||
           message.filter.projectKeys.includes(w.spec.projectRef),
       )) {
+        if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
+          entries.push(
+            ...(await readArchivedInventory(this.options.inventoryStore, workspace, message)),
+          );
+          continue;
+        }
+        // A freshly allocated CR has never hosted a daemon or agent. Once reconciled,
+        // any unavailable inventory is reported explicitly, including recovery failures.
+        if (!workspace.status) continue;
         const connection = await this.connection(workspace);
         const filter = message.filter
           ? object(translate(message.filter, workspace, connection.localId, "in"))
@@ -388,18 +560,21 @@ export class GatewaySession {
           )
             throw new Error("Unexpected agent inventory response");
           entries.push(
-            ...reply.payload.entries.map((entry) => ({
-              ...object(translate(entry, workspace, connection.localId, "out")),
-              syncSeq: this.options.directory.next(),
-            })),
+            ...reply.payload.entries.map((entry) => {
+              const translated = object(translate(entry, workspace, connection.localId, "out"));
+              return {
+                ...translated,
+                agent: AgentSnapshotPayloadSchema.parse(translated.agent),
+                syncSeq: this.options.directory.next(),
+              };
+            }),
           );
           cursor = reply.payload.pageInfo.hasMore
             ? (reply.payload.pageInfo.nextCursor ?? undefined)
             : undefined;
         } while (cursor);
       }
-      if (entries.length > (message.page?.limit ?? 200))
-        throw new Error("POC agent page limit exceeded; narrow the filter");
+      sortAgents(entries, message.sort);
       this.options.emit({
         type:
           message.type === "fetch_agents_request"
@@ -407,8 +582,7 @@ export class GatewaySession {
             : "fetch_agent_history_response",
         payload: {
           requestId,
-          entries,
-          pageInfo: { nextCursor: null, prevCursor: null, hasMore: false },
+          ...this.pages.read(pageKey, message.page, entries),
           ...(message.type === "fetch_agents_request"
             ? {
                 subscriptionId: message.subscribe?.subscriptionId ?? null,
@@ -463,12 +637,77 @@ export class GatewaySession {
       });
       return;
     }
+    if (message.type === "fetch_agent_request" && message.agentId.includes("~")) {
+      const route = parseScopedId(message.agentId);
+      const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
+      if (workspace?.spec.residency === "Archived" && this.options.inventoryStore) {
+        const entry = (await readArchivedInventory(this.options.inventoryStore, workspace)).find(
+          (row) => row.agent.id === message.agentId,
+        );
+        this.options.emit({
+          type: "fetch_agent_response",
+          payload: { requestId, agent: entry?.agent ?? null, project: entry?.project, error: null },
+        });
+        return;
+      }
+    }
+    if (
+      typeof record.agentId === "string" &&
+      !record.agentId.includes("~") &&
+      message.type !== "agent.create.request"
+    ) {
+      const query = record.agentId;
+      const matches: Extract<SessionOutboundMessage, { type: "fetch_agent_response" }>[] = [];
+      for (const workspace of workspaces) {
+        if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
+          for (const entry of await readArchivedInventory(this.options.inventoryStore, workspace)) {
+            const id = parseScopedId(entry.agent.id).backendId;
+            if (id.startsWith(query) || entry.agent.title?.toLowerCase() === query.toLowerCase())
+              matches.push({
+                type: "fetch_agent_response",
+                payload: { requestId, agent: entry.agent, project: entry.project, error: null },
+              });
+          }
+          continue;
+        }
+        if (!workspace.status) continue;
+        const connection = await this.connection(workspace);
+        const reply = await connection.backend.request({
+          type: "fetch_agent_request",
+          requestId: randomUUID(),
+          agentId: query,
+        });
+        if (reply.type !== "fetch_agent_response")
+          throw new Error("Unexpected agent lookup response");
+        if (reply.payload.agent) {
+          const translated = SessionOutboundMessageSchema.parse(
+            translate(reply, workspace, connection.localId, "out"),
+          );
+          if (translated.type === "fetch_agent_response")
+            matches.push({ ...translated, payload: { ...translated.payload, requestId } });
+        }
+      }
+      if (matches.length > 1)
+        throw new Error(
+          "Agent prefix or title is ambiguous across workspaces; use the full scoped ID",
+        );
+      if (message.type === "fetch_agent_request") {
+        this.options.emit(
+          matches[0] ?? {
+            type: "fetch_agent_response",
+            payload: { requestId, agent: null, error: null },
+          },
+        );
+        return;
+      }
+      const matched = matches[0]?.payload.agent;
+      if (!matched) throw new Error("Agent not found");
+      record.agentId = matched.id;
+    }
     if (message.type === "client_heartbeat" || message.type === "ping") return;
-    if (message.type === "create_agent_request") {
+    if (message.type === "create_agent_request" || message.type === "agent.create.request") {
       if (message.worktree || message.worktreeName || message.git)
         throw new Error("Create workspaces through the cluster workspace operation first");
-      if (message.config.provider !== "claude")
-        throw new Error("This POC supports Claude Code only");
     }
     if (providerRequests.has(message.type)) {
       const workspace =
@@ -523,7 +762,12 @@ export class GatewaySession {
       this.uploads.set(record.requestId, workspace.metadata.name);
     if (typeof record.subscriptionId === "string")
       this.subscriptions.set(record.subscriptionId, workspace.metadata.name);
-    if (!("requestId" in input) || typeof input.requestId !== "string") {
+    if (
+      input.type === "agent_permission_response" ||
+      !("requestId" in input) ||
+      typeof input.requestId !== "string"
+    ) {
+      // Here requestId identifies a permission prompt; upstream sends no RPC ack.
       connection.backend.send(input);
       return;
     }
@@ -541,6 +785,7 @@ export class GatewaySession {
   }
 
   async binary(data: Uint8Array) {
+    await this.records();
     const terminal = decodeTerminalStreamFrame(data);
     if (terminal) {
       const route = this.slots.inward(terminal.slot);
@@ -609,6 +854,7 @@ export class GatewaySession {
 
   async close() {
     this.closed = true;
+    this.options.operations?.close?.(this.options.emit);
     await Promise.allSettled(
       [...this.connections.values()].map(async (entry) => (await entry).backend.close()),
     );

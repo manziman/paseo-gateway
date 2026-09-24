@@ -1,7 +1,16 @@
-FROM ghcr.io/getpaseo/paseo:0.7.1@sha256:622ae1ec9d13b45073bcc0a72b286fc50ca8c6a5c5f3a31b468e67d3fcb11dac
+FROM ghcr.io/getpaseo/paseo:0.9.1@sha256:9aae08258b6ff85853da3144ef48c2fd355cfe644500ca4d6041753da589098d
 USER root
-RUN npm install --global @anthropic-ai/claude-code@2.1.274 && npm cache clean --force
+RUN apt-get update && apt-get install -y --no-install-recommends gh openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global @anthropic-ai/claude-code@2.1.274 @openai/codex@0.156.1 opencode-ai@1.18.32 \
+    && npm cache clean --force
 COPY docker/initialize.mjs /opt/paseo/initialize.mjs
+COPY docker/git-credential.mjs /opt/paseo/git-credential.mjs
+COPY docker/teardown.mjs /opt/paseo/teardown.mjs
+COPY docker/token-file.mjs /opt/paseo/token-file.mjs
+COPY --chmod=755 docker/gh.mjs /usr/local/bin/gh
+COPY --chmod=755 docker/paseo-cli.mjs /opt/paseo/bin/paseo
+COPY docker/cli-target.mjs /opt/paseo/bin/cli-target.mjs
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/paseo-workspace-entrypoint
 ENTRYPOINT ["/usr/local/bin/paseo-workspace-entrypoint"]
 USER 1000:1000

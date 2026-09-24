@@ -7,8 +7,9 @@ Run isolated Paseo workspaces on Kubernetes and expose them as one host to an
 unchanged Paseo client. One TypeScript service contains the gateway and workspace
 controller. Workspace pods run the version-pinned upstream Paseo daemon.
 
-**Experimental POC, not a supported v0.1 release.** The target is two concurrent
-Claude Code workspaces with retained files/history and gateway replacement.
+**Experimental MVP candidate.** The headless platform adds private repositories,
+credential profiles, scheduled agents, scoped in-pod worker spawning and explicit
+retention policies. Full parity is gated on the remaining acceptance checks.
 See [compatibility and acceptance](docs/compatibility.md) for verified behavior,
 limitations, and the remaining live checks.
 
@@ -61,8 +62,8 @@ kubectl --context docker-desktop -n paseo-system get paseoworkspaces.paseo-gatew
 ```
 
 The example uses a public repository. Create additional `PaseoProject` records
-from [the example](deploy/examples/project.yaml). Private Git authentication is
-not implemented in this POC. Tailscale belongs to the deployment environment;
+from [the example](deploy/examples/project.yaml). Use [credential profiles](docs/credential-profiles.md) for private HTTPS or SSH Git,
+provider configuration and custom runtime images. Tailscale belongs to the deployment environment;
 the gateway has no Tailscale integration. Use an external encrypted path for
 remote access and configure `gateway.allowedHosts` for its hostname.
 
@@ -72,6 +73,7 @@ remote access and configure `gateway.allowedHosts` for its hostname.
 npm run check          # strict types, lint/format, unit and socket tests, build
 npm run generate:crds  # generate structural CRDs from the runtime schemas
 helm lint charts/paseo
+npm run test:cli       # unmodified pinned upstream CLI JSON contract
 npm run test:upstream  # two real upstream Docker daemons; creates/cleans test resources
 npm run test:live      # Docker Desktop Kubernetes smoke/recovery test
 ```
@@ -85,6 +87,9 @@ After editing the service, rerun `npm run dev:up` to build/load images and apply
 the chart. Its rolling strategy is `Recreate`; only one gateway is supported.
 Workspace agents continue during a gateway restart. Restarting a workspace pod
 can interrupt its current turn; neither service replays prompts automatically.
+
+For headless CLI/SDK setup, schedules, private-repository acceptance and diagnostics,
+see [MVP operations](docs/mvp-operations.md) and the [tracked release plan](docs/mvp-plan.md).
 
 ## Layout
 

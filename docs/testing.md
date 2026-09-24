@@ -9,6 +9,12 @@ conflicting routes, path traversal, content preservation, permission request IDs
 agent snapshots, and terminal slots. Backend deadline tests cover long agent waits,
 unbounded waits released on disconnect, and ordinary mutation timeouts without replay.
 
+The expanded suites cover credential projections and GitHub App renewal,
+scoped authentication, durable creation observation, schedules and retention.
+`npm run test:cli` installs the unmodified pinned upstream executable temporarily
+and exercises agent and schedule commands against the gateway. CI runs these
+contracts separately from the regular unit suite.
+
 `npm run test:upstream` starts two real upstream daemon containers from
 `paseo-workspace:dev`, fronts them with the gateway, and connects the actual
 Paseo client. It checks directory aggregation, separate file contents, binary
@@ -51,6 +57,15 @@ workspaces; archive them afterward to release compute.
 Set `PASEO_NAMESPACE` on setup, credential import, connection and live-test
 commands to target a separate installation. The default remains `paseo-system`;
 all Kubernetes access explicitly uses `docker-desktop`.
+
+Additional headless fixtures are documented in [MVP operations](mvp-operations.md):
+`test:lifecycle` verifies real PVC-finalizer waiting and ephemeral cleanup;
+`test:auth` verifies scoped access and token expiry. The explicitly opted-in
+`test:private` runs real Claude orchestrators and workers against an authorized
+private repository and creates unmerged draft PRs. It attempts to pause its test
+schedule even when assertions fail. These are live acceptance tests, not part of
+credential-free CI. The credential renewal suite uses a mock GitHub endpoint;
+it does not claim live GitHub App or shared provider subscription renewal.
 
 Then exercise the desktop acceptance scenarios:
 

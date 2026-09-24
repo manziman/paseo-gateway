@@ -42,6 +42,18 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            - name: GATEWAY_NAME
+              value: {{ .Values.gateway.name | quote }}
+            - name: GATEWAY_SIGNING_KEY_FILE
+              value: /signing/password
+            - name: GATEWAY_INTERNAL_URL
+              value: "ws://paseo-gateway.{{ .Release.Namespace }}.svc:8080/ws"
+            - name: MAX_RUNNING_WORKSPACES
+              value: {{ .Values.gateway.maxRunningWorkspaces | quote }}
+            - name: WORKSPACE_READY_TIMEOUT_SECONDS
+              value: {{ .Values.gateway.workspaceReadyTimeoutSeconds | quote }}
+            - name: SCHEDULE_HISTORY_LIMIT
+              value: {{ .Values.gateway.scheduleHistoryLimit | quote }}
             - name: NODE_OPTIONS
               value: {{ .Values.gateway.nodeOptions | quote }}
             - name: PASEO_NAMESPACE
@@ -57,7 +69,7 @@ spec:
             - name: WORKSPACE_STORAGE_SIZE
               value: {{ .Values.workspace.storageSize | quote }}
             - name: GATEWAY_ALLOWED_HOSTS
-              value: {{ .Values.gateway.allowedHosts | quote }}
+              value: {{ printf "%s,paseo-gateway,paseo-gateway.%s.svc" .Values.gateway.allowedHosts .Release.Namespace | quote }}
             - name: GATEWAY_PASSWORD_FILE
               value: /identity/password
             - name: GATEWAY_ID_FILE
@@ -79,10 +91,15 @@ spec:
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10
           volumeMounts:
+            - {name: signing, mountPath: /signing, readOnly: true}
             - {name: identity, mountPath: /identity, readOnly: true}
             - {name: backend, mountPath: /backend, readOnly: true}
             - {name: tmp, mountPath: /tmp}
       volumes:
+        - name: signing
+          secret:
+            secretName: {{ .Values.gateway.signingSecret }}
+            defaultMode: 0440
         - name: identity
           secret:
             secretName: {{ .Values.gateway.identitySecret }}

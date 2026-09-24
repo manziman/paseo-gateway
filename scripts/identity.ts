@@ -5,7 +5,7 @@ import { statusCode } from "../src/kubernetes/store.js";
 import { context, namespace } from "./local-config.js";
 
 const api = loadKubernetesConfig(context).makeApiClient(CoreV1Api);
-for (const name of ["paseo-identity", "paseo-backend"]) {
+for (const name of ["paseo-identity", "paseo-backend", "paseo-signing"]) {
   try {
     await api.readNamespacedSecret({ namespace, name });
   } catch (error) {

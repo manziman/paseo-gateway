@@ -1,11 +1,14 @@
 # Security
 
-This POC supports one trusted owner in one namespace. It is not a multi-tenant
-sandbox. Agents can execute code in their workspace and access the subscription
-token mounted into that pod's environment. Do not run untrusted repositories or
+This experimental gateway supports one trusted owner and project/profile-scoped
+workspace credentials in one namespace. It is not a multi-tenant sandbox. Agents
+can execute code and access credentials projected into their workspace. Do not run untrusted repositories or
 grant untrusted users gateway access.
 
-Gateway and backend passwords are separate retained Secrets. Direct WebSocket
+Gateway and backend passwords and the scoped-token signing key are separate
+retained Secrets. Workers receive short-lived grants rather than the owner
+password or signing key; origin archival, scope changes and expiry revoke access.
+Direct WebSocket
 requests must authenticate, and Host/Origin checks restrict browser access.
 The local port-forward binds to loopback. Remote installations must provide an
 encrypted transport externally (for example Tailscale or TLS); plain WebSocket
@@ -28,5 +31,5 @@ node-failure fencing. See [recovery constraints](docs/operations.md).
 For a vulnerability, use GitHub's private vulnerability reporting if enabled on
 this repository; otherwise contact `@manziman` privately before disclosing it.
 Never post credentials, private code, prompt contents, or an active exploit
-against someone else's installation in a public issue. Only the pinned POC
+against someone else's installation in a public issue. Only the pinned experimental
 configuration is under active development; no security support SLA is offered.

@@ -25,6 +25,7 @@ jobs:
           version: v3.17.3
       - run: npm ci
       - run: npm run check
+      - run: npm run test:cli
       - run: npm run generate:crds && git diff --exit-code -- charts/paseo/crds
       - run: helm lint charts/paseo && helm template paseo charts/paseo --namespace paseo-system --include-crds > /tmp/paseo.yaml
       - run: npm audit --omit=dev --audit-level=high

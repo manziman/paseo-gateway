@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
+import {
+  getAgentStatusPriority,
+  getWorkspaceStateBucketPriority,
+} from "@getpaseo/protocol/agent-state-bucket";
+import type { AgentSnapshotPayload, WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
 import type { Project, Workspace } from "../domain.js";
 import { projectPath, workspacePath } from "../domain.js";
 
@@ -59,4 +63,131 @@ export class DirectoryGeneration {
       removals: [],
     };
   }
+}
+
+/** Session-local immutable pages prevent duplicates when other pods change between reads.
+ * Cursors expire on disconnect/replacement and never authorize access by themselves.
+ */
+export class DirectoryPages {
+  private readonly snapshots = new Map<
+    string,
+    { key: string; entries: unknown[]; expiresAt: number; bytes: number }
+  >();
+  constructor(private readonly now: () => number = Date.now) {}
+
+  read<T>(key: string, page: { limit: number; cursor?: string } | undefined, entries?: T[]) {
+    for (const [id, snapshot] of this.snapshots)
+      if (snapshot.expiresAt <= this.now()) this.snapshots.delete(id);
+    let id: string;
+    let offset = 0;
+    let rows: T[];
+    if (page?.cursor) {
+      const [token, index, ...extra] = page.cursor.split(":");
+      const snapshot = token ? this.snapshots.get(token) : undefined;
+      offset = Number(index);
+      if (
+        !snapshot ||
+        snapshot.key !== key ||
+        extra.length ||
+        !/^\d+$/.test(index ?? "") ||
+        !Number.isSafeInteger(offset) ||
+        offset >= snapshot.entries.length
+      )
+        throw new Error("Directory cursor expired or invalid; restart the listing");
+      id = token as string;
+      rows = snapshot.entries as T[];
+    } else {
+      rows = entries ?? [];
+      const bytes = Buffer.byteLength(JSON.stringify(rows));
+      // Leave framing headroom under the gateway's 8 MiB socket limit.
+      if (bytes > 6 * 1024 * 1024 || rows.length > 10000)
+        throw new Error("Directory snapshot capacity exceeded; narrow the filter");
+      id = randomUUID();
+      if (page && rows.length > page.limit) {
+        while (
+          this.snapshots.size >= 4 ||
+          [...this.snapshots.values()].reduce((total, item) => total + item.bytes, 0) + bytes >
+            12 * 1024 * 1024
+        ) {
+          const oldest = this.snapshots.keys().next().value;
+          if (!oldest) break;
+          this.snapshots.delete(oldest);
+        }
+        this.snapshots.set(id, {
+          key,
+          entries: rows,
+          bytes,
+          expiresAt: this.now() + 5 * 60 * 1000,
+        });
+      }
+    }
+    const limit = page?.limit ?? rows.length;
+    const end = offset + limit;
+    return {
+      entries: rows.slice(offset, end),
+      pageInfo: {
+        nextCursor: end < rows.length ? `${id}:${end}` : null,
+        prevCursor: offset ? `${id}:${Math.max(0, offset - limit)}` : null,
+        hasMore: end < rows.length,
+      },
+    };
+  }
+}
+
+function compare(left: string | number, right: string | number) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** Apply ordering after merging pods, using the same state buckets as the pinned daemon. */
+export function sortAgents<T extends { agent: AgentSnapshotPayload }>(
+  entries: T[],
+  sort?: {
+    key: "status_priority" | "created_at" | "updated_at" | "title";
+    direction: "asc" | "desc";
+  }[],
+) {
+  const fields = sort?.length ? sort : [{ key: "updated_at" as const, direction: "desc" as const }];
+  const value = (agent: AgentSnapshotPayload, key: (typeof fields)[number]["key"]) => {
+    if (key === "status_priority")
+      return getAgentStatusPriority({
+        status: agent.status,
+        pendingPermissionCount: agent.pendingPermissions.length,
+        requiresAttention: agent.requiresAttention,
+        attentionReason: agent.attentionReason,
+      });
+    if (key === "title") return agent.title?.toLocaleLowerCase() ?? "";
+    return Date.parse(key === "created_at" ? agent.createdAt : agent.updatedAt) || 0;
+  };
+  return entries.sort((left, right) => {
+    for (const field of fields) {
+      const result = compare(value(left.agent, field.key), value(right.agent, field.key));
+      if (result) return field.direction === "asc" ? result : -result;
+    }
+    return left.agent.id.localeCompare(right.agent.id);
+  });
+}
+
+export function sortWorkspaces<T extends WorkspaceDescriptorPayload>(
+  entries: T[],
+  sort?: {
+    key: "status_priority" | "activity_at" | "name" | "project_id";
+    direction: "asc" | "desc";
+  }[],
+) {
+  const fields = sort?.length
+    ? sort
+    : [{ key: "activity_at" as const, direction: "desc" as const }];
+  const value = (workspace: WorkspaceDescriptorPayload, key: (typeof fields)[number]["key"]) => {
+    if (key === "status_priority") return getWorkspaceStateBucketPriority(workspace.status);
+    if (key === "name") return workspace.name.toLocaleLowerCase();
+    if (key === "project_id") return workspace.projectId.toLocaleLowerCase();
+    return workspace.activityAt ? Date.parse(workspace.activityAt) || 0 : 0;
+  };
+  return entries.sort((left, right) => {
+    for (const field of fields) {
+      const result = compare(value(left, field.key), value(right, field.key));
+      if (result) return field.direction === "asc" ? result : -result;
+    }
+    return left.id.localeCompare(right.id);
+  });
 }

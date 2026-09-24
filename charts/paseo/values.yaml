@@ -8,6 +8,11 @@ workspace:
   storageClass: ""
   storageSize: 5Gi
 gateway:
+  name: Paseo Gateway
+  signingSecret: paseo-signing
+  maxRunningWorkspaces: 20
+  workspaceReadyTimeoutSeconds: 300
+  scheduleHistoryLimit: 50
   nodeOptions: --max-old-space-size=256
   allowedHosts: localhost,127.0.0.1
   identitySecret: paseo-identity
@@ -21,3 +26,8 @@ resources:
     memory: 1Gi
 networkPolicy:
   enabled: true
+  egress:
+    enabled: false
+    rules: []
+    # Additional egress per credential profile. Kubernetes policies are additive.
+    profiles: []

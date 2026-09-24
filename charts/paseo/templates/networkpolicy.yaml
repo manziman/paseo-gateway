@@ -16,3 +16,50 @@ spec:
       ports:
         - {protocol: TCP, port: 6767}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paseo-workspace-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: workspace
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: gateway
+      ports:
+        - {protocol: TCP, port: 8080}
+    {{- with .Values.networkPolicy.egress.rules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- range .Values.networkPolicy.egress.profiles }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: paseo-profile-{{ .name }}-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: workspace
+      paseo-gateway.manziman.github.io/credential-profile: {{ .name | quote }}
+  policyTypes: [Egress]
+  egress:
+    {{- toYaml .rules | nindent 4 }}
+{{- end }}
+{{- end }}

@@ -18,6 +18,7 @@ const scopedKeys = new Set([
 ]);
 // Never traverse user/provider content: a prompt containing an `agentId` property is still just content.
 const opaqueKeys = new Set([
+  "env",
   "event",
   "content",
   "message",
@@ -49,6 +50,11 @@ export function translate(
   const result: JsonObject = {};
   const record = object(value);
   for (const [key, item] of Object.entries(record)) {
+    // A caller-chosen ID on creation identifies the new backend resource, not a route.
+    if (direction === "in" && record.type === "agent.create.request" && key === "agentId") {
+      result[key] = item;
+      continue;
+    }
     if (
       typeof item === "string" &&
       (scopedKeys.has(key) ||
@@ -85,7 +91,11 @@ export function selectWorkspace(message: JsonObject, workspaces: Workspace[]): W
   const candidates = new Set<string>();
   if (typeof message.workspaceId === "string") candidates.add(message.workspaceId);
   for (const key of scopedKeys)
-    if (typeof message[key] === "string") candidates.add(parseScopedId(message[key]).workspaceId);
+    if (
+      typeof message[key] === "string" &&
+      !(message.type === "agent.create.request" && key === "agentId")
+    )
+      candidates.add(parseScopedId(message[key]).workspaceId);
   const config = message.config && typeof message.config === "object" ? object(message.config) : {};
   const cwd = message.cwd ?? config.cwd;
   if (typeof cwd === "string") {

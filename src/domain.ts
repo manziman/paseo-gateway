@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { validRepository } from "./credentials/repository.js";
+import { CredentialProfileSpecSchema, RuntimeOverridesSchema } from "./credentials/schema.js";
 
 export const API_GROUP = "paseo-gateway.manziman.github.io";
 export const WORKSPACE_UID_LABEL = `${API_GROUP}/workspace-uid`;
@@ -29,13 +31,32 @@ export const ProjectSchema = z.object({
     displayName: z.string().min(1).max(200),
     repository: z
       .string()
-      .url()
-      .refine((s) => {
-        const url = new URL(s);
-        return url.protocol === "https:" && !url.username && !url.password;
-      }, "Use an HTTPS repository URL without embedded credentials"),
-    revision: z.string().min(1).max(200).default("HEAD"),
+      .max(2048)
+      .refine(validRepository, "Use HTTPS without credentials or SSH with the git user"),
+    revision: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]*$/)
+      .default("HEAD"),
     credentialProfile: name,
+    runtime: RuntimeOverridesSchema.optional(),
+    cache: z
+      .object({
+        claimName: name,
+        subPath: z
+          .string()
+          .min(1)
+          .max(240)
+          .regex(/^[A-Za-z0-9._/-]+$/)
+          .refine(
+            (value) => value.split("/").every((part) => !!part && part !== "." && part !== ".."),
+            "Use a safe relative cache path",
+          )
+          .optional(),
+      })
+      .optional(),
+    maxRunningWorkspaces: z.number().int().min(1).max(10000).optional(),
   }),
 });
 
@@ -48,8 +69,26 @@ export const WorkspaceSchema = z.object({
     displayName: z.string().min(1).max(200),
     residency: z.enum(["Running", "Suspended", "Archived"]).default("Running"),
     credentialProfile: name,
-    revision: z.string().min(1).max(200).default("HEAD"),
-    branch: z.string().min(1).max(200).optional(),
+    revision: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]*$/)
+      .default("HEAD"),
+    branch: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/)
+      .optional(),
+    fetchDepth: z.number().int().min(0).max(100000).optional(),
+    pullRequest: z.number().int().positive().optional(),
+    retentionPolicy: z
+      .object({
+        storage: z.enum(["Retain", "Ephemeral"]),
+        ttlAfterArchivedSeconds: z.number().int().min(0).max(31536000).optional(),
+      })
+      .optional(),
   }),
   status: z
     .object({
@@ -57,6 +96,10 @@ export const WorkspaceSchema = z.object({
       observedGeneration: z.number().int(),
       message: z.string(),
       pvcName: z.string().optional(),
+      archivedAt: z.string().optional(),
+      teardownCompletedAt: z.string().optional(),
+      storageDeletedAt: z.string().optional(),
+      lastFailure: z.object({ reason: z.string(), message: z.string(), at: z.string() }).optional(),
       backendWorkspaceId: z.string().optional(),
       conditions: z
         .array(
@@ -73,6 +116,14 @@ export const WorkspaceSchema = z.object({
     })
     .optional(),
 });
+
+export const CredentialProfileSchema = z.object({
+  apiVersion: z.literal(API_VERSION),
+  kind: z.literal("PaseoCredentialProfile"),
+  metadata,
+  spec: CredentialProfileSpecSchema,
+});
+export type CredentialProfile = z.infer<typeof CredentialProfileSchema>;
 
 export type Project = z.infer<typeof ProjectSchema>;
 export type Workspace = z.infer<typeof WorkspaceSchema>;
