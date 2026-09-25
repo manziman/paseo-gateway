@@ -17,7 +17,7 @@ RUN mkdir -p /patched-linkify /patched-uc-micro \
     && tar -xzf /tmp/linkify-it.tgz -C /patched-linkify --strip-components=1 \
     && tar -xzf /tmp/uc.micro.tgz -C /patched-uc-micro --strip-components=1
 
-FROM ghcr.io/getpaseo/paseo:0.9.1@sha256:9aae08258b6ff85853da3144ef48c2fd355cfe644500ca4d6041753da589098d
+FROM ghcr.io/getpaseo/paseo:0.9.2@sha256:d413ff361bc4018d559da3d517a6d5a9eaca721fbb1b71ae8df3dcf7a965c136
 ARG TARGETARCH
 ARG RELEASE_VERSION=0.1.0-poc.1
 ARG RELEASE_REVISION=development
