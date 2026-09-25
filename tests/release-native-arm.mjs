@@ -30,6 +30,8 @@ function fixture(t) {
   const command = (binary, args, options = {}) => {
     calls.push({ binary, args, options });
     if (binary === "git") return revision;
+    if (binary === "node" && args[0] === "scripts/validator-memory.mjs")
+      return JSON.stringify({ status: "PASS", baseline: false, peakRss: 355_000_000 });
     if (binary === "docker" && args[0] === "info") return "aarch64";
     if (args.includes("--raw"))
       return JSON.stringify({
@@ -63,12 +65,37 @@ test("native ARM gate verifies pinned source and both exact image children befor
   assert.equal(evidence.images.gateway.testedReference, `${repositories.gateway}@${child}`);
   assert.equal(evidence.images.workspace.testedReference, `${repositories.workspace}@${child}`);
   assert.equal(existsSync(join(f.output, "native-arm64-verification.json")), true);
+  assert.equal(evidence.gatewayMemory.status, "PASS");
+  const memory = f.calls.find(({ binary }) => binary === "node");
+  assert.deepEqual(memory.args, [
+    "scripts/validator-memory.mjs",
+    `${repositories.gateway}@${child}`,
+  ]);
   const upstream = f.calls.filter(({ binary }) => binary === "npm");
   assert.equal(upstream.length, 1);
   assert.deepEqual(upstream[0].options.env, {
     DOCKER_DEFAULT_PLATFORM: "linux/arm64",
     UPSTREAM_TEST_IMAGE: `${repositories.workspace}@${child}`,
   });
+});
+test("native ARM gate refuses failed or malformed validator memory evidence before signing", (t) => {
+  for (const report of ['{"status":"FAIL"}', '{"status":"PASS","baseline":true}', "not JSON"]) {
+    const f = fixture(t);
+    assert.throws(() =>
+      verifyNativeArm(version, digest, digest, {
+        ...f.options,
+        command(binary, args, options) {
+          if (binary === "node") return report;
+          return f.command(binary, args, options);
+        },
+      }),
+    );
+    assert.equal(existsSync(join(f.output, "native-arm64-verification.json")), false);
+    assert.equal(
+      f.calls.some(({ binary }) => binary === "npm"),
+      false,
+    );
+  }
 });
 test("native ARM gate rejects substituted chart bytes before running candidate images", (t) => {
   const f = fixture(t);

@@ -721,5 +721,18 @@ unchanged, and no Pod started. Both existing active test workspace Pod UIDs and
 restart counts also remained unchanged through the gateway-only rollout.
 
 This verifies the subscription protocol correction, not uncached transcript
-access while compute is stopped. A longer read-only memory observation is in
-progress; #72 remains open pending its outcome and further candidate validation.
+access while compute is stopped.
+
+The same normal candidate subsequently reached 80 minutes of process age at
+20:09:53 UTC with zero restarts, unchanged image/Pod UID/process start, and no
+recorded termination. There were 21,778 external memory samples over 78 minutes
+50 seconds: RSS stayed at 327–356 MiB and cgroup usage peaked at 370 MiB. All
+16 authenticated project/retained-inventory SDK polls passed. Both existing
+workspace Pod UIDs and restart counts remained unchanged.
+
+The host slept during the observation, producing a 229-second sampling gap;
+this is not an uninterrupted 80-minute soak. It exceeds the previously observed
+15–38-minute recurrence intervals and supports the targeted mitigation, without
+establishing arbitrary-load or EKS stability. The release's exact ARM64 gateway
+artifact must also pass the bounded validator regression before signing;
+representative EKS load and failure observation remain part of #61.
