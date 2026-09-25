@@ -25,8 +25,10 @@ chats in separate workspaces kept their messages and activity separate when
 switching between them. After the local connection helpers were restored, the
 operator confirmed a connected host and both histories intact following app
 quit/reopen. Terminals in both test workspaces also displayed their own distinct
-markers correctly when switching between them. This does not complete the remaining checklist
-or the fresh-preference, zero-Ready cold-start scenario.
+markers correctly when switching between them. A text file uploaded through the
+desktop attachment control was read by the agent with matching contents. These
+results do not complete the remaining checklist or the fresh-preference,
+zero-Ready cold-start scenario.
 
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.
 

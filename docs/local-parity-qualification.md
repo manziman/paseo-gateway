@@ -453,5 +453,12 @@ reconnect does not qualify memory stability.
 On 2026-09-25, the operator opened a terminal in each of the two test workspaces,
 printed a distinct harmless marker in each, and confirmed that both terminals
 worked and their output stayed separate when switching between them. This
-qualifies the manual terminal routing/isolation check. Desktop attachment and
-download controls remain separate acceptance gates.
+qualifies the manual terminal routing/isolation check.
+
+## Desktop attachment upload
+
+On 2026-09-25, the operator attached a small text file through the desktop chat
+control and asked the agent to read it. The returned contents matched the test
+marker. This qualifies manual attachment upload and agent access in the selected
+workspace. Opening or downloading an agent-generated file remains a separate
+acceptance gate.
