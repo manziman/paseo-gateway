@@ -321,3 +321,94 @@ This qualifies the SDK creation
 path and selected-ref checkout; interactive Desktop picker rendering remains a
 manual check. Custom workspace images must include the ref-inspection helper;
 older image overrides were not qualified by this run.
+
+## First-turn catalog handoff and latency
+
+On 2026-09-25, a manual initial tool prompt was persisted and completed in 2.343
+seconds after the workspace became Ready about 12 seconds after creation. The
+operator nevertheless observed a multi-minute delay before seeing its output.
+The timestamps establish that the delay was outside provider execution.
+
+A source-backed replay of the pinned Desktop's viewed-timeline synchronizer
+confirmed that late subscription normally catches up with an authoritative tail
+fetch. A separate real first-turn SDK fixture returned creation completion at
+33.2 seconds and fetched the completed turn by 36.0 seconds, including preceding
+cold Project checkout discovery. That replay did not query the draft's separate
+workspace catalog and therefore did not qualify Desktop's complete handoff.
+
+The missing dependency was reproduced separately: Desktop creates a draft as
+soon as the Workspace ID arrives, then requests models at the Workspace cwd.
+It withholds draft-to-agent handoff while those models are loading. The first
+workspace-scoped request failed at 0.39 seconds because the Pod was Pending. At
+15.98 seconds, a read against the Ready workspace returned loading rows with no
+Claude models. A manual later read at 17.61 seconds returned 15 Claude models,
+and the assistant was stored by 18.64 seconds; no scoped model-ready push was
+observed. This is tracked in #71.
+
+The two automated fixtures were archived with teardown confirmed, and only their
+CRs/PVCs were removed using exact UID preconditions. The user's workspace was
+left intact. Private prompts, endpoint details, and raw histories are excluded
+from this report.
+
+## Directory query amplification and memory qualification
+
+The initial directory list and every subscribed refresh read one shared label
+catalog once per workspace. With 23 suspended workspaces, each performed 23
+identical reads. The #70 request-scoped batch fix reduces each to one read while
+retaining label freshness, distinct workspace labels, UID replacement checks,
+and scoped authorization. Its integrated check passed 312 tests (two skipped),
+lint, typecheck, build, and the release/qualification checks.
+
+The gateway also had 25 historical memory-limit restarts over about 13 hours,
+with the last recorded termination `OOMKilled` under a 1 GiB limit. Later samples
+were stable near 401 MiB RSS. Compressed read loops returned near their initial
+heap usage after the request-timeout lifetime expired, although RSS stayed at
+an allocator high-water mark. These observations do not prove an unbounded
+store-read leak or establish label-query amplification as the sole restart
+cause. Longer candidate qualification remains tracked in #72.
+
+## First-turn catalog fix qualification
+
+The #71 fix aligns the backend with native legacy event delivery and forwards
+fully materialized provider entries. Global/home catalog pushes are dropped
+rather than relabeled as repository catalogs. A new workspace request can wait
+for readiness; if that wait times out, a UID- and authorization-bound interest
+can still publish the correct catalog automatically when Ready. Interests are
+limited to four per session and expire after five minutes. Healthy workspace
+reads do not consume those pending slots. Closing the session aborts waits and
+prevents late backend connections.
+
+A fresh Docker Desktop Claude fixture made exactly one catalog request as soon
+as the Workspace ID arrived. The Pending request succeeded after readiness;
+automatic updates carried 15 Claude models by 15.3 seconds. Creation completed at
+17.2 seconds, then the first timeline subscription delivered both tool activity
+and the assistant live by 20.0 seconds. No second catalog pull or repeated
+history fetch was needed to make the response visible through the SDK sequence.
+
+A separate credential-free test image delayed repository initialization by 35
+seconds. Its only workspace catalog request failed as still Pending at 25.2
+seconds. The workspace reached Ready at 50.7 seconds; an automatic matching-cwd
+update delivered 15 Claude models at 60.2 seconds, without another client pull.
+This verifies recovery after the initial RPC timeout, including the periodic
+readiness check's delay. Archive/teardown and exact-UID cleanup of the owned
+workspaces, PVCs, and delayed fixture configuration completed. The user's Pod
+retained its UID and both container restart counts remained zero.
+
+Observed gateway digest:
+`sha256:eb71a5c6c817d1bc251a2858dbd4716ce2e82302cfa8dd946284e7d1aa482a8c`.
+The normal workspace used the previously recorded
+`sha256:cba69c0dfe4e5eb4f1b0ddf3275a6a0b7aaeb54582518770c981fe3356a75996` image.
+The intentionally delayed derivative was
+`sha256:e17f6bbe89d734b274eaad41808aa3ed08ed652154445941ecd5bf6e5e751eb1`.
+
+The exact integrated source tree passed 325 tests (two skipped), lint, typecheck,
+build, and release/qualification checks. The pinned native two-daemon contract
+asserts that a fresh cwd produces a resolved full provider update despite
+contradictory caller capabilities. Unit/socket tests cover Pending readiness,
+timeout recovery, healthy-workspace capacity, global/repository catalog
+isolation, identity and access changes, and close/expiry races.
+
+Temporary metadata-only relay tracing was removed after qualification. Manual
+Desktop confirmation of the corrected first-chat handoff remains pending. A
+35-minute read-only memory sampler is running for #72; its initial observations
+do not yet establish long-term stability or explain the historical restarts.

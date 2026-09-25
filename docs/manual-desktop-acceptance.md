@@ -33,7 +33,11 @@ first workspace and agent. Repeat with saved worktree isolation: a detached
 source revision may truthfully have no current branch, yet submission should
 use the Project's configured revision without inventing a branch-off request.
 Record the time to discover providers, a bounded diagnostic error if it fails,
-and whether retry works. A saved provider preference or a previously Ready
+and whether retry works. After the new Workspace appears, its separate model
+catalog must become ready and the draft must open the agent automatically,
+without refreshing, reopening, or resending the prompt. Record time to Workspace
+Ready and time to visible tool/reply separately; a completed server turn alone
+does not qualify this handoff (tracked in #71). A saved provider preference or a previously Ready
 workspace invalidates this cold-start check. It is tracked in
 [#65](https://github.com/manziman/paseo-gateway/issues/65).
 
