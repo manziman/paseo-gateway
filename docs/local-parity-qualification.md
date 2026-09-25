@@ -616,3 +616,47 @@ reconnected to the gateway, and confirmed that it remained assigned to the
 chosen workspace and absent from the second test workspace. This passes manual
 label persistence and assignment isolation. It does not qualify retained agent
 inventory, whose aggregate-listing failure is tracked separately in #75.
+
+## Partial retained inventory
+
+The Desktop's global active-agent request failed when any authorized stopped
+workspace lacked a retained snapshot, hiding verified agents from other
+workspaces. Commit `4310497` preserves those verified rows using the pinned
+protocol's partial `changes` mode. Unknown inventory is not reported as empty;
+targeted unavailable reads and aggregate reads with no verified source still
+return a bounded error. UID, authorization, lifecycle and cursor checks fence
+asynchronous reads and retained rows. See [inventory semantics](schedules-inventory-files.md)
+for the limits of partial updates across gateway replacement.
+
+The exact SDK/socket regression failed before the fix and passed afterward.
+The integrated source passed 353 unit/socket tests (two skipped), lint,
+typecheck, build and release/qualification checks; a subsequent cursor-fencing
+refinement passed the focused tests, lint and typecheck.
+
+On 2026-09-25, the deployed normal gateway
+`sha256:a2501404911c35b1ee93060c195a1abb4640aae10075bec079c6bb5fbf9802b3`
+returned 29 unique agents through the Desktop's active, updated-at-sorted,
+200-row request in one partial page. Two suspended fixtures contributed two and
+one retained closed/unavailable agents respectively. Project-scoped queries and
+closed-status filtering also returned those rows. Both workspace UIDs and their
+suspended state were unchanged, with no Pods created. Manual visibility in the
+Desktop remains pending; this is an automated protocol qualification.
+
+## Normal-image memory recurrence
+
+The normal gateway image
+`sha256:113c37e0af111775a52adef7dcbcd662a2e581a1e9fcab9e06bbd5d90cafabbf`
+was again terminated with `OOMKilled`/exit 137 at 17:48:23 UTC on 2026-09-25,
+31 minutes after its container started. The fresh numeric observation begun
+after storage recovery captured 6,941 samples before the termination interrupted
+its planned 40-minute window. This was a failed observation, not a completed
+healthy soak.
+
+In the last 0.411 seconds observed, gateway PID 1 RSS rose from about 432 to
+899 MiB, cgroup usage from 466 to 936 MiB, and anonymous memory from 378 to
+848 MiB. File cache stayed near 78 MiB and node available memory remained about
+2.8 GiB. The allocator path remains unknown. The earlier 25-minute diagnostic
+window cannot rule out a trigger that recurred after 31 minutes, and its
+instrumentation may affect timing. The prior disk-pressure interval is recorded
+separately; these observations do not establish it as the cause. Issue #72 remains
+a release blocker.
