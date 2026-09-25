@@ -46,6 +46,8 @@ import {
   workspaceDescriptor,
 } from "./catalog.js";
 import type { DownloadHandles } from "./downloads.js";
+import { normalizeProjectBranchName } from "./project-ref-selection.js";
+import type { ProjectRefInspector, ProjectRefQuery } from "./project-refs.js";
 import { projectForCatalogPath } from "./provider-catalog.js";
 import type { ProviderCatalog } from "./provider-catalog-service.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
@@ -109,6 +111,7 @@ const providerRequests = new Set([
 
 export interface SessionOptions {
   checkoutRpcTimeoutMs?: number;
+  projectRefRpcTimeoutMs?: number;
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
   agentRouting?: AgentRouting;
@@ -133,6 +136,7 @@ export interface SessionOptions {
   providerCatalog?: Pick<ProviderCatalog, "snapshot" | "watch" | "checkoutStatus"> & {
     identity(project: Project): Promise<{ fingerprint: string }>;
   };
+  projectRefs?: Pick<ProjectRefInspector, "query">;
   directory: DirectoryGeneration;
   hello: WSHelloMessage;
   emit: (message: SessionOutboundMessage | JsonObject) => void;
@@ -422,14 +426,52 @@ export class GatewaySession {
     return status;
   }
 
+  private async scopedProjectRefs(project: Project, query: ProjectRefQuery) {
+    const catalog = this.options.providerCatalog;
+    const inspector = this.options.projectRefs;
+    if (!catalog || !inspector) throw new Error("Project ref inspection is unavailable");
+    const identity = await catalog.identity(project);
+    const profile = await this.options.store.credentialProfile(project.spec.credentialProfile);
+    if (!profile || profile.metadata.namespace !== project.metadata.namespace)
+      throw new Error("Project ref credential profile is unavailable");
+    if ((await catalog.identity(project)).fingerprint !== identity.fingerprint)
+      throw new Error("Project ref configuration changed");
+    const result = await inspector.query({ project, profile, query });
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Project ref access changed");
+    if ((await catalog.identity(current)).fingerprint !== identity.fingerprint)
+      throw new Error("Project ref configuration changed");
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Project ref access or configuration changed");
+    return result;
+  }
+
   async handle(message: SessionInboundMessage) {
     if (this.closed) return;
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
     const projectCheckout =
-      message.type === "checkout_status_request" && message.cwd.startsWith("/projects/");
+      (message.type === "checkout_status_request" ||
+        message.type === "branch_suggestions_request" ||
+        message.type === "validate_branch_request") &&
+      message.cwd.startsWith("/projects/");
     const checkoutDeadline = projectCheckout
-      ? Date.now() + (this.options.checkoutRpcTimeoutMs ?? 45_000)
+      ? Date.now() +
+        (message.type === "checkout_status_request"
+          ? (this.options.checkoutRpcTimeoutMs ?? 45_000)
+          : (this.options.projectRefRpcTimeoutMs ?? 58_000))
       : undefined;
     let checkoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -1008,6 +1050,53 @@ export class GatewaySession {
           requestId: message.requestId,
         },
       });
+      return;
+    }
+    if (
+      (message.type === "branch_suggestions_request" ||
+        message.type === "validate_branch_request") &&
+      message.cwd.startsWith("/projects/")
+    ) {
+      const project = projectForCatalogPath(message.cwd, projects);
+      if (!project) throw new Error("Project ref source is not authorized or configured");
+      const query: ProjectRefQuery =
+        message.type === "branch_suggestions_request"
+          ? { mode: "suggest", query: message.query, limit: message.limit }
+          : { mode: "validate", branchName: message.branchName };
+      const result = await this.scopedProjectRefs(project, query);
+      if (checkoutDeadline !== undefined && Date.now() >= checkoutDeadline)
+        throw new Error("Project ref inspection timed out; retry shortly");
+      if (this.closed) return;
+      if (result.mode === "suggest") {
+        this.options.emit({
+          type: "branch_suggestions_response",
+          payload: {
+            requestId: message.requestId,
+            branches: result.refs,
+            branchDetails: result.refs.map((name) => ({
+              name,
+              committerDate: 0,
+              hasLocal: false,
+              hasRemote: true,
+            })),
+            error: null,
+          },
+        });
+      } else {
+        this.options.emit({
+          type: "validate_branch_response",
+          payload: {
+            requestId: message.requestId,
+            exists: result.exists,
+            resolvedRef:
+              result.exists && query.mode === "validate"
+                ? `origin/${normalizeProjectBranchName(query.branchName)}`
+                : null,
+            isRemote: result.exists,
+            error: result.valid ? null : "Invalid Git branch name",
+          },
+        });
+      }
       return;
     }
     if (providerRequests.has(message.type)) {

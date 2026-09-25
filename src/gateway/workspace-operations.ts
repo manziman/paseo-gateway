@@ -38,6 +38,7 @@ import {
 import { type Backend, PaseoBackend } from "./backend.js";
 import { workspaceDescriptor } from "./catalog.js";
 import { CreationJournal, type CreationProgress } from "./creation-journal.js";
+import { checkedOutBranchName, fetchRevisionForRef } from "./project-ref-selection.js";
 import { object, translate } from "./routing.js";
 import { ScheduleDispatchRejected } from "./schedules.js";
 import type { UploadStaging } from "./uploads.js";
@@ -234,20 +235,14 @@ export class WorkspaceOperations {
       throw new Error("Only GitHub pull-request checkout is supported");
     if (source.kind === "worktree" && source.checkoutSource?.projectPath)
       throw new Error("Cross-repository pull-request checkout is not supported");
-    const revision =
+    const revision = fetchRevisionForRef(
       source.kind === "worktree"
         ? (source.baseBranch ?? source.refName ?? project.spec.revision)
-        : project.spec.revision;
+        : project.spec.revision,
+    );
     const pullRequest =
       source.kind === "worktree"
         ? (source.checkoutSource?.number ?? source.githubPrNumber)
-        : undefined;
-    const branch =
-      source.kind === "worktree"
-        ? (source.branchName ??
-          (source.action === "checkout" && !pullRequest
-            ? source.refName?.replace(/^origin\//, "")
-            : undefined))
         : undefined;
     const fingerprint = hash({
       projectId,
@@ -259,6 +254,15 @@ export class WorkspaceOperations {
     const name = message.idempotencyKey
       ? `w-${hash([this.options.namespace, projectId, message.idempotencyKey]).slice(0, 32)}`
       : `w-${randomUUID()}`;
+    const branch =
+      source.kind === "worktree"
+        ? (source.branchName ??
+          (source.action === "branch-off"
+            ? (source.worktreeSlug ?? `paseo/${name}`)
+            : source.action === "checkout" && !pullRequest && source.refName
+              ? checkedOutBranchName(source.refName)
+              : undefined))
+        : undefined;
     const expected = WorkspaceSchema.parse({
       apiVersion: API_VERSION,
       kind: "PaseoWorkspace",
@@ -272,7 +276,7 @@ export class WorkspaceOperations {
         credentialProfile: project.spec.credentialProfile,
         displayName: message.title ?? name,
         residency: "Running",
-        revision: revision.replace(/^origin\//, ""),
+        revision,
         ...(branch ? { branch } : {}),
         ...(pullRequest ? { pullRequest } : {}),
         ...(source.kind === "worktree" ? { fetchDepth: 0 } : {}),

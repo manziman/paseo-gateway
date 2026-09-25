@@ -9,6 +9,7 @@ import { GitHubAppBroker } from "./credentials/github-app.js";
 import { AgentIdentityRegistry } from "./gateway/agent-identity.js";
 import { deleteArchivedInventory } from "./gateway/agent-inventory.js";
 import { AgentRouting } from "./gateway/agent-routing.js";
+import { ProjectRefInspector } from "./gateway/project-refs.js";
 import { ProviderCatalog } from "./gateway/provider-catalog-service.js";
 import { ScheduleService } from "./gateway/schedules.js";
 import { startGateway } from "./gateway/server.js";
@@ -106,6 +107,7 @@ async function main() {
     backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
     runtime: runtimeConfig,
   });
+  const projectRefs = new ProjectRefInspector({ store, runtime: runtimeConfig });
   const broker = new GitHubAppBroker(store);
   const codexBroker = new CodexSubscriptionBroker(store);
   // Provider endpoints must not delay the HTTP startup probe. The serialized
@@ -117,6 +119,7 @@ async function main() {
     backendPassword,
     backendSecure: !!process.env.WORKSPACE_TLS_SECRET,
     providerCatalog,
+    projectRefs,
     tls: process.env.GATEWAY_TLS_CERT_FILE
       ? {
           cert: await readFile(required("GATEWAY_TLS_CERT_FILE")),
@@ -166,6 +169,11 @@ async function main() {
     }
   };
   const scheduleLoop = periodic(() => schedules.tick(), 1000, "schedule_reconcile_failed");
+  const refRecoveryLoop = periodic(
+    () => projectRefs.recoverExpired(),
+    30_000,
+    "project_ref_recovery_failed",
+  );
   const brokerLoop = periodic(
     async () => {
       const profiles = await store.credentialProfiles();
@@ -189,7 +197,7 @@ async function main() {
     abort.abort();
     await schedules.close(25000);
     await gateway.close();
-    await Promise.all([loop, scheduleLoop, brokerLoop]);
+    await Promise.all([loop, scheduleLoop, refRecoveryLoop, brokerLoop]);
   };
   process.once("SIGTERM", () => void shutdown());
   process.once("SIGINT", () => void shutdown());
