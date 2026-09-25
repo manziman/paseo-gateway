@@ -608,3 +608,11 @@ completed the checks on the same workspace/PVC; no product patch or repeated
 failure fixture was needed. The original failed harness report is retained alongside
 the successful recovery report. These tests establish Pod-wide retry fencing and
 retained recovery, not the cause or repair of the earlier environment DNS outage.
+
+## Desktop workspace labels
+
+The operator created a test label through the workspace row's Labels menu,
+reconnected to the gateway, and confirmed that it remained assigned to the
+chosen workspace and absent from the second test workspace. This passes manual
+label persistence and assignment isolation. It does not qualify retained agent
+inventory, whose aggregate-listing failure is tracked separately in #75.
