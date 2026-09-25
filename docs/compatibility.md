@@ -23,7 +23,17 @@ Current implementation and CLI evidence are described in [upstream parity](upstr
 [credential profiles](credential-profiles.md), and the [MVP plan](mvp-plan.md).
 Passing fixture contracts does not establish live private-repository or provider acceptance.
 
-## Current candidate evidence (0.9.1)
+## Published alpha and remaining parity
+
+The latest published baseline is `v1.0.0-alpha.3`. Its
+[qualification record](https://github.com/manziman/paseo-gateway/releases/download/v1.0.0-alpha.3/qualification.md)
+adds clean public-artifact installation, cross-role denial, upgrade/rollback and
+reinstall evidence to the earlier development-candidate results below. The
+[completion plan](parity-completion-plan.md) tracks remaining implementation and
+live qualification. EKS deployment and validation are the final operator-assisted
+step; they are not implied by Docker Desktop results.
+
+## Development candidate evidence (0.9.1)
 
 Acceptance on 2026-09-24 used Docker Desktop Kubernetes 1.34.3, Docker Engine
 29.8.0, and the `standard` local-path StorageClass. The isolated `paseo-mvp`
@@ -51,11 +61,38 @@ The private fixture uses an explicitly authorized test repository and credential
 loaded from local files/authentication into Kubernetes Secrets. Its provider
 configuration, tokens and repository contents are not committed as test fixtures.
 The acceptance schedule was paused after verification. Draft PRs remain unmerged
-test artifacts. GitHub App renewal is covered by mocked
-provider/CAS tests, not live App credentials. Codex and OpenCode binaries are
-installed and pinned; their authenticated live runs remain unverified. Shared
-Codex subscription refresh remains unsupported as described in
-[credential renewal](credential-renewal.md).
+test artifacts. At that candidate, GitHub App renewal had only mocked
+provider/CAS evidence, and authenticated Codex/OpenCode runs and shared Codex
+subscription refresh were unverified. The current development work below does
+not retroactively qualify those published artifacts.
+
+## Full-parity development work
+
+The completion branch adds existing-agent schedules, retained suspended
+inventory, workspace labels, staged attachments, HTTP downloads, a dedicated
+Codex subscription authority, optional verified TLS, and configurable PVC access
+modes. These changes are not yet a published or fully qualified release.
+
+The unmodified pinned SDK and two actual upstream daemon containers have passed
+attachment byte integrity, late workspace binding, consumed-handle rejection,
+HTTP download integrity, cross-workspace path denial and handle invalidation
+after gateway replacement. Local TLS tests verify trusted HTTPS/WSS and reject
+untrusted certificates and incorrect hostnames. Two real Claude agents have run
+concurrently through TLS on Docker Desktop with distinct per-spawn environment
+values and histories. Read-only probes on two deployed workspace Pods confirmed
+that the daemon accepts loopback connections, refuses its Pod-IP plaintext port,
+and is reachable through its Service using verified TLS from the gateway. These
+are Docker Desktop observations, not EKS NetworkPolicy or node-fencing evidence.
+The Codex authority and bridge have passed concurrent worker prompts, actual
+native renewal, projected access replacement on unchanged Pods, and both idle
+and active-turn gateway recovery. OpenCode has passed concurrent prompts through
+an OpenAI-compatible model gateway, catalog discovery, and idle/active-turn
+gateway recovery. Credential expiry/revocation and explicit operator credential
+replacement remain unqualified. See [local qualification](local-parity-qualification.md),
+[provider acceptance](provider-acceptance.md) and the
+[client acceptance matrix](client-acceptance.md) for remaining live gates.
+The implemented behavior and transfer limits are documented in
+[schedule, inventory and file contracts](schedules-inventory-files.md).
 
 ## Historical POC evidence (0.7.1)
 
@@ -121,22 +158,32 @@ archived with their PVCs retained.
 - Explicit directory pages support at most 200 entries each, with session-scoped
   cursors. Unpaged CLI requests return bounded complete snapshots. Oversized
   results fail explicitly instead of silently truncating.
-- Archived agent metadata is retained until storage retention expires. Suspended
-  or unreachable live inventory remains explicitly unavailable. Archived metadata
-  excludes transcripts and provider persistence details.
+- Archived and gracefully suspended agent metadata is retained, with stale
+  snapshots explicitly marked unavailable for live provider operations. A failed
+  workspace without a captured snapshot reports unavailable inventory. Metadata
+  excludes transcripts, pending permissions and provider persistence details.
+  Opening a retained agent does not start its workspace: the gateway acknowledges
+  its timeline membership from the UID-bound snapshot, then reports history as
+  unavailable while compute is stopped. A desktop-local cached transcript can
+  remain visible, but uncached history cannot be reconstructed from metadata.
+  Archived Ephemeral storage has been released, so its transcript may be gone.
 - File/Git operations and terminal traffic route to their workspace. Attachment
-  upload requests without workspace identity and HTTP download-token URLs need
-  a separate routing contract and are not supported yet.
-- New-agent schedules and their history are implemented. Existing-agent schedule
-  targets, plugins, voice and workspace label management remain unsupported.
+  uploads are bounded and staged until an agent operation identifies the target;
+  HTTP downloads use short-lived, single-use gateway handles. Both paths retain
+  workspace UID and authorization checks.
+- New-agent and existing-agent schedules and their history are implemented.
+  Workspace label definitions and assignments are persisted with UID fencing.
+  Plugins and voice remain outside this milestone.
   Daemon status reports the gateway process; recycle/password/local-host
   administration is intentionally replaced by Kubernetes lifecycle and Secrets.
 - Agent-originated built-in Paseo tools are disabled to prevent untracked local
   workspace creation. The in-pod CLI wrapper routes sibling creation to the gateway
   with a scoped, renewable credential; workflow policy remains with the consumer.
 - GitHub App installation-token renewal is implemented. Claude setup-token
-  rotation remains manual. Shared rotating provider OAuth files are unsupported;
-  use independently valid supported credentials rather than copied refresh tokens.
+  rotation remains manual. An experimental Codex authority owns a dedicated
+  native login and projects access-only credentials to workers; concurrent live
+  renewal and gateway recovery have passed locally. Independently copied refresh-token files are
+  unsupported. See [credential renewal](credential-renewal.md).
 - No EKS support claim until storage, encrypted networking and node-failure
   fencing are validated there.
 

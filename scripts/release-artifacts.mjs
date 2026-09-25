@@ -230,7 +230,9 @@ export function verifyImage(name, image, version, output, command = run, env = p
         "node",
         reference,
         "/inventory.mjs",
-        name === "gateway" ? "/app/node_modules" : "/usr/local/lib/node_modules",
+        ...(name === "gateway"
+          ? ["/app/node_modules", "/usr/local/lib/node_modules"]
+          : ["/usr/local/lib/node_modules"]),
       ],
       { env },
     );

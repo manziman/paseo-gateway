@@ -78,6 +78,35 @@ This does not extend mutation deadlines or enable replay.
 Workspace pod replacement can interrupt
 an active turn even though files and provider history survive.
 
+The checkout init container retries only recognized transient Git DNS, network,
+and timeout failures, at most three fetch attempts within a 150-second **Pod-wide**
+budget. A receipt in an init-only, Pod-local `checkout-budget` emptyDir preserves
+the original deadline, consumed attempts, and retry backoff across
+checkout-container restarts. The initializer creates a private owner-only
+directory under `/run/paseo-checkout`; the daemon cannot mount that volume. Each
+attempt is recorded before Git starts. Permanent failures and exhausted budgets
+are latched: kubelet may restart the failed init container under the unchanged
+`Always` policy, but it reports the same safe failure without fetching again.
+Malformed receipts fail closed. This does not alter daemon restart behavior.
+It keeps the same workspace volume and writes the ready marker only after a
+successful checkout. Authentication, missing revision, local storage, and
+unclassified failures stop promptly. The controller accepts only fixed
+termination reason codes such as `CheckoutDnsUnavailable` and publishes a
+credential-safe status message; unknown or malformed container text remains
+`ContainerFailed`. These codes identify the observed fetch failure, not the
+underlying DNS service cause. A persistent DNS outage still prevents checkout.
+
+After repairing the cause, explicitly suspend the failed workspace, wait for its
+Pod to disappear, then resume it. The replacement Pod gets a fresh retry budget;
+the same PVC and any interrupted checkout remain. Do not delete the PVC or its
+checkout-ready marker. A successfully initialized PVC bypasses Git entirely on
+container or Pod restart, preserving dirty files and never replaying an agent.
+The budget applies to one Pod, not indefinitely across operator-created or
+controller-created replacement Pods. The initializer is the receipt's sole writer.
+This relies on Kubernetes' documented [init container restart behavior](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#understanding-init-containers)
+and [`emptyDir` lifetime](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir):
+data survives a container crash and is deleted when its Pod is removed.
+
 One pod and a ReadWriteOnce PVC are sufficient for the local single-node POC,
 but are not fencing under node partitions. Never force-delete a pod on an
 unreachable node while its volume may still have a writer. Fence the node or
@@ -90,6 +119,13 @@ Image updates do not forcibly restart workspaces. Suspend/resume idle workspaces
 to adopt the configured image. Changes to the checkout revision, branch,
 credential-profile reference and project reference require a new workspace;
 the CRD enforces that immutability.
+The checkout-budget path change must be deployed with both the controller and
+workspace image. An old image ignores the new init-only mount; a new image in an
+old Pod spec cannot write its required receipt for a fresh or incomplete checkout
+and fails closed; an existing checkout-ready marker bypasses the budget. Existing Pods
+are not patched or restarted by this controller change, so a controlled
+suspend/resume is needed to adopt the paired candidate. Roll back both images
+together; do not fall back to the daemon-shared `/tmp` receipt path.
 
 ## Claude subscription credentials
 
@@ -126,6 +162,10 @@ to avoid stale images cached in kind. Existing workspace pods still adopt a new
 image only after an explicit idle suspend/resume.
 
 ## Gateway memory budget
+
+The pinned gateway launch includes `--no-maglev` to avoid a reproduced native
+memory spike in the SDK validator. See the [exact scope and opt-in regression](gateway-validator-memory.md).
+This is an explicit Node argument; do not add it to `gateway.nodeOptions`.
 
 The local chart requests 512 MiB and limits the gateway to 1 GiB, with
 `gateway.nodeOptions: --max-old-space-size=256`. A long Claude response during

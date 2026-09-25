@@ -15,6 +15,10 @@ LABEL org.opencontainers.image.source="https://github.com/manziman/paseo-gateway
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="$RELEASE_VERSION" \
       org.opencontainers.image.revision="$RELEASE_REVISION"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global @openai/codex@0.156.1 --ignore-scripts \
+    && npm cache clean --force
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 ENV NODE_ENV=production
@@ -25,4 +29,7 @@ COPY --from=build /app/package.json ./package.json
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 USER 1000:1000
 EXPOSE 8080
-CMD ["node", "dist/main.js"]
+# The pinned SDK AOT validator reproduced a Maglev native-memory spike on
+# linux/arm64 Node 24.21.0; other architectures require separate qualification.
+# Keep this explicit: --no-maglev is not accepted in NODE_OPTIONS.
+CMD ["node", "--no-maglev", "dist/main.js"]

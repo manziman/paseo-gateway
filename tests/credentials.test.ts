@@ -111,9 +111,17 @@ describe("credential profile boundaries", () => {
     const repo = project();
     repo.spec.runtime = { image: "project:2", resources: { requests: { memory: "2Gi" } } };
     const pod = desiredResources(workspace(), repo, config, credentials).pod;
+    const preparation = pod.spec?.initContainers?.find(
+      (container) => container.name === "prepare-home",
+    );
+    expect(preparation).toBeDefined();
+    expect(preparation?.env ?? []).toEqual([]);
+    expect(preparation?.volumeMounts?.every((mount) => ["data", "tmp"].includes(mount.name))).toBe(
+      true,
+    );
     for (const container of [
-      ...(pod.spec?.initContainers ?? []),
-      ...(pod.spec?.containers ?? []),
+      ...(pod.spec?.initContainers?.filter((container) => container.name === "checkout") ?? []),
+      ...(pod.spec?.containers?.filter((container) => container.name === "daemon") ?? []),
     ]) {
       expect(container.image).toBe("project:2");
       expect(container.env).toContainEqual({

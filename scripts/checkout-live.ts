@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { resourceName } from "../src/controller/resources.js";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
+import { liveConnection, liveConnectionConfig } from "./live-connection.js";
 import { context, namespace } from "./local-config.js";
 
 // Creates and archives one test workspace; external Git operations are read-only.
@@ -22,9 +23,10 @@ if (
 )
   throw new Error("Set PASEO_TEST_PROJECT and a positive integer PASEO_TEST_PR");
 
+const connectionConfig = await liveConnectionConfig();
 const store = new KubernetesStore(loadKubernetesConfig(context), namespace);
 assert.ok((await store.projects()).some((row) => row.metadata.name === projectId));
-const encoded = (await store.secret("paseo-identity")).data?.password;
+const encoded = (await store.secret(connectionConfig.identitySecret)).data?.password;
 assert.ok(encoded, "Gateway identity is unavailable");
 const execute = promisify(execFile);
 async function git(pod: string, args: string[]) {
@@ -103,8 +105,10 @@ try {
     // Drain diagnostics without printing potentially sensitive cluster output.
     proxy.stderr.resume();
   });
+  const connection = liveConnection(port, connectionConfig);
   client = new DaemonClient({
-    url: `ws://127.0.0.1:${port}/ws`,
+    url: connection.url,
+    transportFactory: connection.transportFactory,
     password: Buffer.from(encoded, "base64").toString("utf8"),
     clientId: randomUUID(),
     reconnect: { enabled: false },

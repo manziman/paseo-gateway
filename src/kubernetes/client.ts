@@ -111,24 +111,24 @@ export class KubernetesStore implements Store, RecordStore {
     }
   }
 
-  async create(object: Infrastructure): Promise<void> {
+  async create(object: Infrastructure): Promise<Infrastructure> {
     switch (object.kind) {
       // Generated Kubernetes models have string `kind` fields rather than discriminated unions.
       case "Pod":
-        await this.core.createNamespacedPod({ namespace: this.namespace, body: object as V1Pod });
-        break;
+        return await this.core.createNamespacedPod({
+          namespace: this.namespace,
+          body: object as V1Pod,
+        });
       case "Service":
-        await this.core.createNamespacedService({
+        return await this.core.createNamespacedService({
           namespace: this.namespace,
           body: object as V1Service,
         });
-        break;
       case "PersistentVolumeClaim":
-        await this.core.createNamespacedPersistentVolumeClaim({
+        return await this.core.createNamespacedPersistentVolumeClaim({
           namespace: this.namespace,
           body: object,
         });
-        break;
       default:
         throw new Error("Unsupported infrastructure kind");
     }
@@ -136,6 +136,14 @@ export class KubernetesStore implements Store, RecordStore {
 
   async deletePod(name: string, uid: string) {
     await this.core.deleteNamespacedPod({
+      namespace: this.namespace,
+      name,
+      body: { preconditions: { uid } },
+    });
+  }
+
+  async deleteService(name: string, uid: string) {
+    await this.core.deleteNamespacedService({
       namespace: this.namespace,
       name,
       body: { preconditions: { uid } },

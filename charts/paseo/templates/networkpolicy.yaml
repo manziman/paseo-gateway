@@ -14,7 +14,7 @@ spec:
             matchLabels:
               app.kubernetes.io/component: gateway
       ports:
-        - {protocol: TCP, port: 6767}
+        - {protocol: TCP, port: {{ ternary 6768 6767 .Values.transport.tls.enabled }}}
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
 ---

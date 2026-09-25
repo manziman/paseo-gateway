@@ -49,7 +49,21 @@ export class CreationJournal {
       principal: GatewayPrincipal,
       identity?: { workspaceId: string; workspaceUid: string },
     ) => Promise<void>,
+    private readonly projectSnapshot: (
+      snapshot: CreationSnapshot,
+      principal: GatewayPrincipal,
+      identity?: { workspaceId: string; workspaceUid: string },
+    ) => Promise<CreationSnapshot> = async (snapshot) => snapshot,
   ) {}
+
+  private projected(record: ControlRecord<JournalValue>, principal: GatewayPrincipal) {
+    const { workspaceId, workspaceUid } = record.value;
+    return this.projectSnapshot(
+      record.value.snapshot,
+      principal,
+      workspaceId && workspaceUid ? { workspaceId, workspaceUid } : undefined,
+    );
+  }
 
   private id(kind: CreationSnapshot["kind"], key: string) {
     return digest([kind, key]);
@@ -84,8 +98,8 @@ export class CreationJournal {
     for (const [subscriptionId, listener] of this.listeners) {
       if (listener.id !== record.id) continue;
       try {
-        await this.checked(record, listener.principal);
-        const snapshot = record.value.snapshot;
+        const checked = await this.checked(record, listener.principal);
+        const snapshot = await this.projected(checked, listener.principal);
         // Upstream's legacy subscription adapter does not classify creation streams.
         // Untagged updates also feed its CreationClient; revision numbers deduplicate.
         listener.emit({
@@ -140,7 +154,7 @@ export class CreationJournal {
       }
       const record = await this.recover(await this.checked(raw, principal));
       if (terminal(record.value.snapshot) && subscriptionId) this.listeners.delete(subscriptionId);
-      return { snapshot: record.value.snapshot, subscriptionId };
+      return { snapshot: await this.projected(record, principal), subscriptionId };
     } catch (error) {
       if (subscriptionId) this.listeners.delete(subscriptionId);
       throw error;
@@ -155,8 +169,14 @@ export class CreationJournal {
     const snapshot = await pending;
     const record = await this.store.record("creation-operation", id);
     if (!record) throw new Error("Creation record disappeared");
-    await this.checked(record, principal);
-    return snapshot;
+    const checked = await this.checked(record, principal);
+    return this.projectSnapshot(
+      snapshot,
+      principal,
+      checked.value.workspaceId && checked.value.workspaceUid
+        ? { workspaceId: checked.value.workspaceId, workspaceUid: checked.value.workspaceUid }
+        : undefined,
+    );
   }
 
   run(

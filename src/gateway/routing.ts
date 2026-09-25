@@ -34,6 +34,9 @@ const opaqueKeys = new Set([
   "arguments",
   "input",
   "output",
+  "metadata",
+  "extra",
+  "outputSchema",
 ]);
 
 /** Translate routing metadata only. Agent and terminal IDs remain reversible across gateway replacement. */
@@ -62,8 +65,7 @@ export function translate(
           (context === "agent" ||
             context === "agents" ||
             context === "terminal" ||
-            context === "terminals" ||
-            "provider" in record)))
+            context === "terminals")))
     ) {
       if (direction === "out") result[key] = scopedId(workspace.metadata.name, item);
       else {

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { posix } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   decodeFileTransferFrame,
   decodeTerminalStreamFrame,
@@ -14,6 +16,7 @@ import {
   type WorkspaceDescriptorPayload,
   type WSHelloMessage,
 } from "@getpaseo/protocol/messages";
+import { z } from "zod";
 import { resourceName } from "../controller/resources.js";
 import {
   API_VERSION,
@@ -25,12 +28,14 @@ import {
 } from "../domain.js";
 import type { RecordStore } from "../kubernetes/records.js";
 import type { Store } from "../kubernetes/store.js";
-import { readArchivedInventory } from "./agent-inventory.js";
+import { RetainedInventoryUnavailableError, readArchivedInventory } from "./agent-inventory.js";
+import type { AgentRouting } from "./agent-routing.js";
 import {
   authorizeProject,
   authorizeWorkspace,
   type GatewayPrincipal,
   principalIsActive,
+  type ScopedAuthOptions,
 } from "./auth.js";
 import { type Backend, PaseoBackend } from "./backend.js";
 import {
@@ -41,8 +46,15 @@ import {
   sortWorkspaces,
   workspaceDescriptor,
 } from "./catalog.js";
+import type { DownloadHandles } from "./downloads.js";
+import { normalizeProjectBranchName } from "./project-ref-selection.js";
+import type { ProjectRefInspector, ProjectRefQuery } from "./project-refs.js";
+import { projectForCatalogPath } from "./provider-catalog.js";
+import type { ProviderCatalog } from "./provider-catalog-service.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
 import type { GatewayRuntime } from "./runtime-status.js";
+import { UploadStaging } from "./uploads.js";
+import { WorkspaceLabels } from "./workspace-labels.js";
 
 const forwarded = new Set([
   "create_agent_request",
@@ -65,8 +77,10 @@ const forwarded = new Set([
   "clear_agent_attention",
   "wait_for_finish_request",
   "list_commands_request",
+  "directory_suggestions_request",
   "file_explorer_request",
   "file.upload.request",
+  "file_download_token_request",
   "list_terminals_request",
   "subscribe_terminals_request",
   "unsubscribe_terminals_request",
@@ -98,9 +112,17 @@ const providerRequests = new Set([
 ]);
 
 export interface SessionOptions {
+  checkoutRpcTimeoutMs?: number;
+  projectRefRpcTimeoutMs?: number;
+  providerReadyTimeoutMs?: number;
+  providerReadyPollMs?: number;
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
+  agentRouting?: AgentRouting;
+  labels?: WorkspaceLabels;
+  downloadHandles?: DownloadHandles;
   principal?: GatewayPrincipal;
+  scopedAuth?: ScopedAuthOptions;
   operations?: {
     creationLifecycle?: boolean;
     close?(emit: SessionOptions["emit"]): void;
@@ -108,11 +130,17 @@ export interface SessionOptions {
       message: SessionInboundMessage,
       emit: SessionOptions["emit"],
       principal: GatewayPrincipal,
+      uploads?: UploadStaging,
     ): Promise<boolean>;
   };
   store: Store;
   namespace: string;
   backendPassword: string;
+  backendSecure?: boolean;
+  providerCatalog?: Pick<ProviderCatalog, "snapshot" | "watch" | "checkoutStatus"> & {
+    identity(project: Project): Promise<{ fingerprint: string }>;
+  };
+  projectRefs?: Pick<ProjectRefInspector, "query">;
   directory: DirectoryGeneration;
   hello: WSHelloMessage;
   emit: (message: SessionOutboundMessage | JsonObject) => void;
@@ -130,36 +158,98 @@ export interface SessionOptions {
 export class GatewaySession {
   private readonly connections = new Map<
     string,
-    Promise<{ backend: Backend; workspace: Workspace; localId: string }>
+    Promise<{
+      backend: Backend;
+      workspace: Workspace;
+      localId: string;
+      retire: () => void;
+      drain: () => Promise<void>;
+      enqueue: <T>(work: () => Promise<T>) => Promise<T>;
+    }>
   >();
   private readonly slots = new TerminalSlots();
   private readonly pages = new DirectoryPages();
-  private readonly uploads = new Map<string, string>();
+  private lastActiveAgentIds = new Map<string, string>(); // Public ID -> workspace UID.
+  private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
+  private readonly providerWatches = new Map<string, { projectUid: string; release: () => void }>();
+  private readonly providerReadinessWaits = new Map<string, Promise<Workspace>>();
+  private readonly providerInterests = new Map<
+    string,
+    {
+      workspaceUid: string;
+      projectUid: string;
+      projectSpec: string;
+      credentialProfile: string;
+      expiresAt: number;
+      publishing: boolean;
+    }
+  >();
+  private readonly closeController = new AbortController();
   private closed = false;
   private watchingWorkspaces = false;
   private refreshing = false;
   private readonly workspaceRuntime = new Map<string, WorkspaceDescriptorPayload>();
   private readonly workspaceProjections = new Map<string, string>();
-  constructor(private readonly options: SessionOptions) {}
+  private readonly labels?: WorkspaceLabels;
+  constructor(private readonly options: SessionOptions) {
+    this.uploads = new UploadStaging((message) => options.emit(message));
+    this.labels =
+      options.labels ??
+      (options.inventoryStore
+        ? new WorkspaceLabels(options.inventoryStore, options.store, options.directory)
+        : undefined);
+  }
+
+  private async project(value: unknown, workspace: Workspace, localId: string) {
+    const translated = translate(value, workspace, localId, "out");
+    return this.options.agentRouting
+      ? this.options.agentRouting.project(translated, workspace)
+      : translated;
+  }
 
   private async connection(workspace: Workspace) {
+    if (this.closed) throw new Error("Gateway session closed");
     if (!authorizeWorkspace(this.options.principal ?? { kind: "owner" }, workspace))
       throw new Error("Workspace access denied");
     const id = workspace.metadata.name;
     const previous = this.connections.get(id);
-    if (previous) return previous;
     if (workspace.spec.residency !== "Running" || workspace.status?.phase !== "Ready") {
       throw new Error(
         `Workspace ${id} is ${workspace.status?.phase ?? "Pending"}; inventory is unavailable, not deleted`,
       );
     }
+    if (previous) {
+      const connected = await previous;
+      if (connected.workspace.metadata.uid !== workspace.metadata.uid) {
+        connected.retire();
+        await connected.backend.close();
+        this.connections.delete(id);
+        this.workspaceRuntime.delete(id);
+        throw new Error("Workspace identity changed; reconnect before acting");
+      }
+      return connected;
+    }
     const promise = (async () => {
       let localId = workspace.status?.backendWorkspaceId ?? "";
+      let retired = false;
+      let eventTail: Promise<void> = Promise.resolve();
+      let pendingEvents = 0;
+      let pendingEventBytes = 0;
+      const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+        const result = eventTail.then(work);
+        eventTail = result.then(
+          () => {},
+          () => {},
+        );
+        return result;
+      };
       const onMessage = (message: SessionOutboundMessage) => {
-        if (this.closed) return;
+        if (this.closed || retired) return;
         if (message.type === "status" && message.payload.status === "server_info") return;
         if (message.type === "project.update") return;
+        // A native global/home catalog does not describe this workspace cwd.
+        if (message.type === "providers_snapshot_update" && !message.payload.cwd) return;
         if (message.type === "workspace_update") {
           // Backend removals never delete cluster records; only project this checkout's runtime.
           if (message.payload.kind === "upsert" && message.payload.workspace.id === localId) {
@@ -168,15 +258,58 @@ export class GatewaySession {
           }
           return;
         }
-        const translated = object(translate(message, workspace, localId, "out"));
-        if (message.type === "agent_update") {
-          const payload = object(translated.payload);
-          payload.generation = this.options.directory.id;
-          payload.seq = this.options.directory.next();
+        const eventBytes = Buffer.byteLength(JSON.stringify(message));
+        pendingEvents++;
+        pendingEventBytes += eventBytes;
+        if (pendingEvents > 256 || pendingEventBytes > 16 * 1024 * 1024) {
+          this.options.disconnect();
+          return;
         }
-        this.options.emit(translated);
+        eventTail = enqueue(async () => {
+          if (this.closed || retired) return;
+          if (message.type === "providers_snapshot_update") {
+            const records = await this.records();
+            const current = records.workspaces.find((row) => row.metadata.name === id);
+            const project = records.projects.find(
+              (row) => row.metadata.name === workspace.spec.projectRef,
+            );
+            if (
+              !current ||
+              current.metadata.uid !== workspace.metadata.uid ||
+              current.spec.residency !== "Running" ||
+              current.status?.phase !== "Ready" ||
+              current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+              !project ||
+              project.spec.credentialProfile !== workspace.spec.credentialProfile
+            )
+              return;
+          }
+          const translated = object(await this.project(message, workspace, localId));
+          if (this.closed || retired) return;
+          if (message.type === "providers_snapshot_update") {
+            const payload = object(translated.payload);
+            if (
+              typeof payload.cwd !== "string" ||
+              (payload.cwd !== workspacePath(id) &&
+                !payload.cwd.startsWith(`${workspacePath(id)}/`))
+            )
+              return;
+          }
+          if (message.type === "agent_update") {
+            const payload = object(translated.payload);
+            payload.generation = this.options.directory.id;
+            payload.seq = this.options.directory.next();
+          }
+          this.options.emit(translated);
+        })
+          .catch(() => this.options.disconnect())
+          .finally(() => {
+            pendingEvents--;
+            pendingEventBytes -= eventBytes;
+          });
       };
       const onBinary = (data: Uint8Array) => {
+        if (this.closed || retired) return;
         const terminal = decodeTerminalStreamFrame(data);
         this.options.emitBinary(
           terminal
@@ -190,7 +323,7 @@ export class GatewaySession {
       const backend =
         this.options.backendFactory?.(workspace, onMessage, onBinary, this.options.disconnect) ??
         new PaseoBackend(
-          `ws://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
+          `${this.options.backendSecure ? "wss" : "ws"}://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
           this.options.backendPassword,
           this.options.hello,
           onMessage,
@@ -220,7 +353,16 @@ export class GatewaySession {
           throw new Error("Workspace subscription failed");
         const runtime = snapshot.payload.entries.find((entry) => entry.id === localId);
         if (runtime) this.workspaceRuntime.set(id, runtime);
-        return { backend, workspace, localId };
+        return {
+          backend,
+          workspace,
+          localId,
+          retire: () => {
+            retired = true;
+          },
+          drain: () => eventTail,
+          enqueue,
+        };
       } catch (error) {
         await backend.close();
         this.connections.delete(id);
@@ -239,6 +381,11 @@ export class GatewaySession {
     const principal = this.options.principal ?? { kind: "owner" };
     if (!principalIsActive(principal, workspaces))
       throw new Error("Workspace credential expired or revoked");
+    if (
+      principal.kind === "workspace" &&
+      this.options.scopedAuth?.revokedTokenIds?.has(principal.tokenId)
+    )
+      throw new Error("Workspace credential expired or revoked");
     return {
       projects: projects.filter(
         (project) =>
@@ -252,18 +399,335 @@ export class GatewaySession {
     };
   }
 
+  /** A stopped checkout retains directory metadata, but not its transcript.
+   * Retained storage is unmounted; ephemeral storage may already be gone.
+   * Membership may be acknowledged without opening a daemon
+   * only for an exact UID-bound retained agent. Re-read authority after storage
+   * and route lookups so an archive, replacement, or revocation cannot race ACK.
+   */
+  private async retainedTimelineAgent(workspace: Workspace, publicId: string) {
+    if (!this.options.inventoryStore) throw new Error("Retained agent inventory is unavailable");
+    const entries = await readArchivedInventory(
+      this.options.inventoryStore,
+      workspace,
+      undefined,
+      workspace.spec.residency === "Archived" ? "archived" : "suspended",
+      this.options.agentRouting,
+    );
+    const agent = entries.find((entry) => entry.agent.id === publicId)?.agent;
+    if (!agent) throw new Error("Agent is not present in UID-bound retained inventory");
+    if (this.options.agentRouting) {
+      const resolved = await this.options.agentRouting.resolveAgent(publicId, [workspace]);
+      if (
+        resolved.workspace.metadata.uid !== workspace.metadata.uid ||
+        resolved.backendAgentId !== agent.id
+      )
+        throw new Error("Retained agent route changed");
+    }
+    const { workspaces } = await this.records();
+    const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
+    if (
+      !current ||
+      current.metadata.uid !== workspace.metadata.uid ||
+      current.spec.projectRef !== workspace.spec.projectRef ||
+      current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+      current.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
+      current.spec.residency !== workspace.spec.residency ||
+      current.status?.phase !== workspace.status?.phase ||
+      current.spec.residency === "Running" ||
+      current.status?.storageDeletedAt
+    )
+      throw new Error("Retained agent workspace stopped, replaced, or access revoked");
+    if (this.closed) throw new Error("Gateway session closed");
+    return agent;
+  }
+
+  /** Wait only for a caller-authorized, UID-bound workspace already being created. */
+  private async readyForProviderSnapshot(
+    selected: Workspace,
+    project: Project,
+  ): Promise<Workspace> {
+    const id = selected.metadata.name;
+    const uid = selected.metadata.uid;
+    if (!uid) throw new Error("Workspace UID is required for provider discovery");
+    const projectUid = project.metadata.uid;
+    if (!projectUid) throw new Error("Project UID is required for provider discovery");
+    // Healthy workspaces use the ordinary forwarding fence and never consume a
+    // slot reserved for cold Pods.
+    if (selected.status?.phase === "Ready") return selected;
+    const projectSpec = JSON.stringify(project.spec);
+    let interest = this.providerInterests.get(id);
+    if (interest && Date.now() >= interest.expiresAt) {
+      this.providerInterests.delete(id);
+      interest = undefined;
+    }
+    if (
+      interest &&
+      (interest.workspaceUid !== uid ||
+        interest.projectUid !== projectUid ||
+        interest.projectSpec !== projectSpec ||
+        interest.credentialProfile !== selected.spec.credentialProfile)
+    )
+      throw new Error("Workspace provider scope changed or access denied");
+    const existing = this.providerReadinessWaits.get(id);
+    if (existing) return existing;
+    if (this.providerReadinessWaits.size >= 4)
+      throw new Error("Too many pending workspace provider requests");
+    if (!interest) {
+      if (this.providerInterests.size >= 4)
+        throw new Error("Too many pending workspace provider interests");
+      this.providerInterests.set(id, {
+        workspaceUid: uid,
+        projectUid,
+        projectSpec,
+        credentialProfile: selected.spec.credentialProfile,
+        expiresAt: Date.now() + 5 * 60_000,
+        publishing: false,
+      });
+    }
+    const wait = (async () => {
+      const deadline = Date.now() + (this.options.providerReadyTimeoutMs ?? 25_000);
+      while (true) {
+        if (this.closed) throw new Error("Gateway session closed");
+        const records = await this.sessionBound(() => this.records());
+        const current = records.workspaces.find((row) => row.metadata.name === id);
+        const currentProject = records.projects.find(
+          (row) => row.metadata.name === selected.spec.projectRef,
+        );
+        if (this.closed) throw new Error("Gateway session closed");
+        if (
+          !current ||
+          current.metadata.uid !== uid ||
+          current.spec.projectRef !== selected.spec.projectRef ||
+          current.spec.credentialProfile !== selected.spec.credentialProfile ||
+          current.spec.residency !== "Running" ||
+          !currentProject ||
+          currentProject.metadata.uid !== projectUid ||
+          JSON.stringify(currentProject.spec) !== projectSpec
+        )
+          throw new Error("Workspace provider scope changed or access denied");
+        if (Date.now() >= deadline)
+          throw new Error("Workspace is still starting; retry provider discovery");
+        if (current.status?.phase === "Ready") return current;
+        if (current.status?.phase === "Failed")
+          throw new Error("Workspace failed before provider discovery");
+        await delay(this.options.providerReadyPollMs ?? 500, undefined, {
+          signal: this.closeController.signal,
+        });
+      }
+    })();
+    this.providerReadinessWaits.set(id, wait);
+    try {
+      return await wait;
+    } finally {
+      if (this.providerReadinessWaits.get(id) === wait) this.providerReadinessWaits.delete(id);
+    }
+  }
+
+  private async publishPendingProviderCatalog(
+    workspace: Workspace,
+    interest: NonNullable<ReturnType<typeof this.providerInterests.get>>,
+  ): Promise<void> {
+    try {
+      const connection = await this.connection(workspace);
+      if (this.closed) return;
+      const reply = await connection.backend.request({
+        type: "get_providers_snapshot_request",
+        requestId: randomUUID(),
+        cwd: workspacePath(workspace.metadata.name),
+      });
+      const records = await this.records();
+      const current = records.workspaces.find(
+        (row) => row.metadata.name === workspace.metadata.name,
+      );
+      const project = records.projects.find(
+        (row) => row.metadata.name === workspace.spec.projectRef,
+      );
+      if (Date.now() >= interest.expiresAt) {
+        if (this.providerInterests.get(workspace.metadata.name) === interest)
+          this.providerInterests.delete(workspace.metadata.name);
+        return;
+      }
+      if (
+        this.closed ||
+        this.providerInterests.get(workspace.metadata.name) !== interest ||
+        !current ||
+        current.metadata.uid !== interest.workspaceUid ||
+        current.spec.projectRef !== workspace.spec.projectRef ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready" ||
+        current.spec.credentialProfile !== interest.credentialProfile ||
+        !project ||
+        project.metadata.uid !== interest.projectUid ||
+        JSON.stringify(project.spec) !== interest.projectSpec ||
+        reply.type !== "get_providers_snapshot_response"
+      )
+        return;
+      const payload = reply.payload;
+      if (payload.compactSnapshot || payload.notModified || payload.snapshotHash)
+        throw new Error("Workspace provider snapshot was not fully materialized");
+      this.options.emit({
+        type: "providers_snapshot_update",
+        payload: {
+          cwd: workspacePath(current.metadata.name),
+          entries: payload.entries,
+          generatedAt: payload.generatedAt,
+        },
+      });
+      if (!payload.entries.some((entry) => entry.status === "loading"))
+        this.providerInterests.delete(workspace.metadata.name);
+    } finally {
+      interest.publishing = false;
+    }
+  }
+
+  private async sessionBound<T>(run: () => Promise<T>): Promise<T> {
+    if (this.closed) throw new Error("Gateway session closed");
+    const work = run();
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(new Error("Gateway session closed"));
+      this.closeController.signal.addEventListener("abort", abort, { once: true });
+      work
+        .then(resolve, reject)
+        .finally(() => this.closeController.signal.removeEventListener("abort", abort));
+    });
+  }
+
   private projectFor(workspace: Workspace, projects: Project[]) {
     const project = projects.find((p) => p.metadata.name === workspace.spec.projectRef);
     if (!project) throw new Error("Workspace project no longer exists");
     return project;
   }
 
+  private async scopedProviderSnapshot(
+    catalog: Pick<ProviderCatalog, "snapshot"> & {
+      identity(project: Project): Promise<{ fingerprint: string }>;
+    },
+    project: Project,
+    force = false,
+  ) {
+    let originalFingerprint: string;
+    try {
+      originalFingerprint = (await catalog.identity(project)).fingerprint;
+    } catch {
+      // The catalog schedules a bounded retry when broker output is absent.
+      await catalog.snapshot(project, force);
+      throw new Error("Provider discovery configuration is unavailable");
+    }
+    const entries = await catalog.snapshot(project, force);
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Provider catalog project access changed");
+    if ((await catalog.identity(current)).fingerprint !== originalFingerprint)
+      throw new Error("Provider catalog configuration changed");
+    // The final identity read can await Secret/ConfigMap API calls. Recheck the
+    // caller and Project after that await so revocation cannot leak a snapshot.
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Provider catalog project access or configuration changed");
+    return entries;
+  }
+
+  private async scopedCheckoutStatus(
+    catalog: Pick<ProviderCatalog, "checkoutStatus"> & {
+      identity(project: Project): Promise<{ fingerprint: string }>;
+    },
+    project: Project,
+  ) {
+    const originalFingerprint = (await catalog.identity(project)).fingerprint;
+    const status = await catalog.checkoutStatus(project);
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Project checkout access changed");
+    if ((await catalog.identity(current)).fingerprint !== originalFingerprint)
+      throw new Error("Project checkout configuration changed");
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Project checkout access or configuration changed");
+    return status;
+  }
+
+  private async scopedProjectRefs(project: Project, query: ProjectRefQuery) {
+    const catalog = this.options.providerCatalog;
+    const inspector = this.options.projectRefs;
+    if (!catalog || !inspector) throw new Error("Project ref inspection is unavailable");
+    const identity = await catalog.identity(project);
+    const profile = await this.options.store.credentialProfile(project.spec.credentialProfile);
+    if (!profile || profile.metadata.namespace !== project.metadata.namespace)
+      throw new Error("Project ref credential profile is unavailable");
+    if ((await catalog.identity(project)).fingerprint !== identity.fingerprint)
+      throw new Error("Project ref configuration changed");
+    const result = await inspector.query({ project, profile, query });
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Project ref access changed");
+    if ((await catalog.identity(current)).fingerprint !== identity.fingerprint)
+      throw new Error("Project ref configuration changed");
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Project ref access or configuration changed");
+    return result;
+  }
+
   async handle(message: SessionInboundMessage) {
     if (this.closed) return;
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
+    const projectCheckout =
+      (message.type === "checkout_status_request" ||
+        message.type === "branch_suggestions_request" ||
+        message.type === "validate_branch_request") &&
+      message.cwd.startsWith("/projects/");
+    const checkoutDeadline = projectCheckout
+      ? Date.now() +
+        (message.type === "checkout_status_request"
+          ? (this.options.checkoutRpcTimeoutMs ?? 45_000)
+          : (this.options.projectRefRpcTimeoutMs ?? 58_000))
+      : undefined;
+    let checkoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await this.dispatch(message);
+      const work = this.dispatch(message, checkoutDeadline);
+      if (checkoutDeadline === undefined) await work;
+      else
+        await Promise.race([
+          work,
+          new Promise<never>((_resolve, reject) => {
+            checkoutTimer = setTimeout(
+              () => reject(new Error("Project checkout discovery timed out; retry shortly")),
+              Math.max(1, checkoutDeadline - Date.now()),
+            );
+          }),
+        ]);
     } catch (error) {
       if (!this.closed && requestId)
         this.options.emit({
@@ -275,18 +739,25 @@ export class GatewaySession {
             error: error instanceof Error ? error.message : "Gateway operation failed",
           },
         });
+    } finally {
+      if (checkoutTimer) clearTimeout(checkoutTimer);
     }
   }
 
-  private async dispatch(message: SessionInboundMessage) {
+  private async dispatch(message: SessionInboundMessage, checkoutDeadline?: number) {
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : "";
     const { projects, workspaces } = await this.records();
+    if (message.type === "file.upload.request") {
+      this.uploads.begin(message);
+      return;
+    }
     if (
       await this.options.operations?.handle(
         message,
         this.options.emit,
         this.options.principal ?? { kind: "owner" },
+        this.uploads,
       )
     )
       return;
@@ -390,21 +861,26 @@ export class GatewaySession {
         });
         return;
       }
-      await Promise.all(
+      await Promise.allSettled(
         active
           .filter((w) => w.spec.residency === "Running" && w.status?.phase === "Ready")
           .map((w) => this.connection(w)),
       );
-      let rows = active
-        .filter((w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId)
-        .map((w) => ({
-          ...workspaceDescriptor(
-            w,
-            this.projectFor(w, projects),
-            this.workspaceRuntime.get(w.metadata.name),
-          ),
-          syncSeq: this.options.directory.next(),
-        }));
+      const visible = active.filter(
+        (w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId,
+      );
+      const labels = await this.labels?.workspaceLabelsMany(visible);
+      let rows = visible.map((w) => ({
+        ...workspaceDescriptor(
+          w,
+          this.projectFor(w, projects),
+          w.spec.residency === "Running" && w.status?.phase === "Ready"
+            ? this.workspaceRuntime.get(w.metadata.name)
+            : undefined,
+        ),
+        labels: labels?.get(w.metadata.name) ?? [],
+        syncSeq: this.options.directory.next(),
+      }));
       if (message.filter?.query) {
         const q = message.filter.query.toLowerCase();
         rows = rows.filter(
@@ -503,6 +979,15 @@ export class GatewaySession {
         sort: message.sort,
         scope: "scope" in message ? message.scope : undefined,
         search: "search" in message ? message.search : undefined,
+        sources: workspaces.map((workspace) => [
+          workspace.metadata.name,
+          workspace.metadata.uid,
+          workspace.spec.projectRef,
+          workspace.spec.credentialProfile,
+          workspace.spec.residency,
+          workspace.status?.phase,
+          !!workspace.status?.storageDeletedAt,
+        ]),
       });
       if (message.page?.cursor) {
         this.options.emit({
@@ -516,7 +1001,6 @@ export class GatewaySession {
             ...(message.type === "fetch_agents_request"
               ? {
                   subscriptionId: message.subscribe?.subscriptionId ?? null,
-                  sync: this.options.directory.snapshot(message.sync?.generation),
                 }
               : {}),
           },
@@ -524,57 +1008,208 @@ export class GatewaySession {
         return;
       }
       const entries: { agent: AgentSnapshotPayload }[] = [];
+      let unavailable: RetainedInventoryUnavailableError | undefined;
+      const unavailableUids = new Set<string>();
       const inventory = message.filter?.includeArchived ? workspaces : active;
-      for (const workspace of inventory.filter(
+      const selectedInventory = inventory.filter(
         (w) =>
           !message.filter?.projectKeys?.length ||
           message.filter.projectKeys.includes(w.spec.projectRef),
-      )) {
+      );
+      const inspected = new Map<string, Workspace>(
+        selectedInventory.map((workspace) => [workspace.metadata.name, workspace]),
+      );
+      for (const workspace of selectedInventory) {
         if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
-          entries.push(
-            ...(await readArchivedInventory(this.options.inventoryStore, workspace, message)),
-          );
+          try {
+            entries.push(
+              ...(await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                message,
+                undefined,
+                this.options.agentRouting,
+              )),
+            );
+          } catch (error) {
+            if (!(error instanceof RetainedInventoryUnavailableError)) throw error;
+            unavailable ??= error;
+            if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          }
           continue;
         }
-        // A freshly allocated CR has never hosted a daemon or agent. Once reconciled,
-        // any unavailable inventory is reported explicitly, including recovery failures.
-        if (!workspace.status) continue;
-        const connection = await this.connection(workspace);
-        const filter = message.filter
-          ? object(translate(message.filter, workspace, connection.localId, "in"))
-          : undefined;
-        if (filter) delete filter.projectKeys;
-        let cursor: string | undefined;
-        do {
-          const request = SessionInboundMessageSchema.parse({
-            ...message,
-            requestId: randomUUID(),
-            filter,
-            sync: undefined,
-            page: { limit: 200, ...(cursor ? { cursor } : {}) },
-          });
-          const reply = await connection.backend.request(request);
-          if (
-            reply.type !== "fetch_agents_response" &&
-            reply.type !== "fetch_agent_history_response"
-          )
-            throw new Error("Unexpected agent inventory response");
-          entries.push(
-            ...reply.payload.entries.map((entry) => {
-              const translated = object(translate(entry, workspace, connection.localId, "out"));
-              return {
-                ...translated,
-                agent: AgentSnapshotPayloadSchema.parse(translated.agent),
-                syncSeq: this.options.directory.next(),
-              };
-            }),
+        if (!workspace.status) {
+          unavailable ??= new RetainedInventoryUnavailableError(
+            `Workspace ${workspace.metadata.name} status unavailable; agent inventory unknown`,
           );
-          cursor = reply.payload.pageInfo.hasMore
-            ? (reply.payload.pageInfo.nextCursor ?? undefined)
+          if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          continue;
+        }
+        const start = entries.length;
+        try {
+          if (workspace.spec.residency !== "Running" || workspace.status.phase !== "Ready")
+            throw new Error("Workspace backend unavailable");
+          const connection = await this.connection(workspace);
+          const filter = message.filter
+            ? object(translate(message.filter, workspace, connection.localId, "in"))
             : undefined;
-        } while (cursor);
+          if (filter) delete filter.projectKeys;
+          let cursor: string | undefined;
+          do {
+            const request = SessionInboundMessageSchema.parse({
+              ...message,
+              requestId: randomUUID(),
+              filter,
+              sync: undefined,
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            const reply = await connection.backend.request(request);
+            if (
+              reply.type !== "fetch_agents_response" &&
+              reply.type !== "fetch_agent_history_response"
+            )
+              throw new Error("Unexpected agent inventory response");
+            const projected = await connection.enqueue(async () => {
+              const translated = translate(
+                reply.payload.entries,
+                workspace,
+                connection.localId,
+                "out",
+              );
+              return this.options.agentRouting
+                ? this.options.agentRouting.project(translated, workspace)
+                : translated;
+            });
+            if (!Array.isArray(projected)) throw new Error("Invalid projected agent page");
+            entries.push(
+              ...projected.map((entry) => {
+                const row = object(entry);
+                return {
+                  ...row,
+                  agent: AgentSnapshotPayloadSchema.parse(row.agent),
+                  syncSeq: this.options.directory.next(),
+                };
+              }),
+            );
+            cursor = reply.payload.pageInfo.hasMore
+              ? (reply.payload.pageInfo.nextCursor ?? undefined)
+              : undefined;
+          } while (cursor);
+        } catch (error) {
+          entries.splice(start);
+          if (!this.options.inventoryStore) throw error;
+          try {
+            entries.push(
+              ...(await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                message,
+                workspace.spec.residency === "Suspended" ? "suspended" : "stale",
+                this.options.agentRouting,
+              )),
+            );
+          } catch (retainedError) {
+            if (!(retainedError instanceof RetainedInventoryUnavailableError)) throw retainedError;
+            unavailable ??= retainedError;
+            if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          }
+        }
       }
+      // A partial response must never assert that an unknown source is empty.
+      // Known rows or removals can still be delivered through merge mode.
       sortAgents(entries, message.sort);
+      const removals = new Set<string>();
+      if (
+        unavailable &&
+        message.type === "fetch_agents_request" &&
+        !message.filter?.includeArchived
+      ) {
+        // An archived workspace's retained IDs are authoritative tombstones for
+        // the active directory, even when another workspace is unavailable.
+        if (this.options.inventoryStore)
+          for (const workspace of workspaces.filter(
+            (row) =>
+              row.spec.residency === "Archived" &&
+              (!message.filter?.projectKeys?.length ||
+                message.filter.projectKeys.includes(row.spec.projectRef)),
+          )) {
+            inspected.set(workspace.metadata.name, workspace);
+            try {
+              for (const entry of await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                undefined,
+                "archived",
+                this.options.agentRouting,
+              ))
+                removals.add(entry.agent.id);
+            } catch (error) {
+              if (!(error instanceof RetainedInventoryUnavailableError)) throw error;
+            }
+          }
+      }
+      const broadActive =
+        message.type === "fetch_agents_request" &&
+        message.scope === "active" &&
+        !message.filter &&
+        !("search" in message && message.search);
+      let nextActiveAgentIds: Map<string, string> | undefined;
+      if (broadActive) {
+        const byName = new Map(workspaces.map((row) => [row.metadata.name, row.metadata.uid]));
+        const current = new Map<string, string>();
+        for (const entry of entries) {
+          const uid = entry.agent.workspaceId && byName.get(entry.agent.workspaceId);
+          if (uid) current.set(entry.agent.id, uid);
+        }
+        if (unavailable) {
+          for (const [id, uid] of this.lastActiveAgentIds)
+            if (!current.has(id) && !unavailableUids.has(uid)) removals.add(id);
+          nextActiveAgentIds = new Map([
+            ...[...this.lastActiveAgentIds].filter(([, uid]) => unavailableUids.has(uid)),
+            ...current,
+          ]);
+        } else nextActiveAgentIds = current;
+      }
+      if (removals.size > 10000)
+        throw new Error("Directory removal capacity exceeded; narrow the filter");
+      if (unavailable && entries.length === 0 && removals.size === 0) throw unavailable;
+      const removalRows = [...removals].map((id) => ({ id, seq: this.options.directory.next() }));
+      // Backend and retained-record reads may outlive the caller's grant or a
+      // workspace UID. Fence the entire aggregate before exposing any entries.
+      const fresh = (await this.records()).workspaces;
+      for (const original of inspected.values()) {
+        const current = fresh.find((row) => row.metadata.name === original.metadata.name);
+        if (
+          !current ||
+          current.metadata.uid !== original.metadata.uid ||
+          current.spec.projectRef !== original.spec.projectRef ||
+          current.spec.credentialProfile !== original.spec.credentialProfile ||
+          current.spec.residency !== original.spec.residency ||
+          current.status?.phase !== original.status?.phase ||
+          !!current.status?.storageDeletedAt !== !!original.status?.storageDeletedAt
+        )
+          throw new Error("Workspace inventory changed during inspection; retry after reconnect");
+      }
+      const agentSync =
+        message.type === "fetch_agents_request"
+          ? this.options.directory.snapshot(message.sync?.generation)
+          : undefined;
+      const page = this.pages.read(
+        pageKey,
+        message.page,
+        entries,
+        agentSync
+          ? unavailable
+            ? {
+                ...agentSync,
+                mode: "changes" as const,
+                reason: undefined,
+                removals: removalRows,
+              }
+            : agentSync
+          : undefined,
+      );
+      if (nextActiveAgentIds) this.lastActiveAgentIds = nextActiveAgentIds;
       this.options.emit({
         type:
           message.type === "fetch_agents_request"
@@ -582,11 +1217,10 @@ export class GatewaySession {
             : "fetch_agent_history_response",
         payload: {
           requestId,
-          ...this.pages.read(pageKey, message.page, entries),
+          ...page,
           ...(message.type === "fetch_agents_request"
             ? {
                 subscriptionId: message.subscribe?.subscriptionId ?? null,
-                sync: this.options.directory.snapshot(message.sync?.generation),
               }
             : {}),
         },
@@ -605,44 +1239,172 @@ export class GatewaySession {
       });
       return;
     }
-    if (message.type === "workspace.label.list.request") {
-      this.options.emit({
-        type: "workspace.label.list.response",
-        payload: { requestId, labels: [], sync: this.options.directory.snapshot() },
-      });
+    if (
+      await this.labels?.handle(
+        message,
+        this.options.principal ?? { kind: "owner" },
+        this.options.emit,
+      )
+    )
       return;
-    }
     if (message.type === "agent.timeline.set_subscription.request") {
       const grouped = new Map<string, string[]>();
+      const retained: { workspace: Workspace; agentId: string }[] = [];
       for (const id of message.agentIds) {
-        const route = parseScopedId(id);
+        const resolved = this.options.agentRouting
+          ? await this.options.agentRouting.resolveAgent(id, workspaces)
+          : undefined;
+        const route = resolved
+          ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+          : parseScopedId(id);
+        const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
+        if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
+        if (workspace.spec.residency !== "Running") {
+          retained.push({
+            workspace,
+            agentId: this.options.agentRouting ? route.backendId : id,
+          });
+          continue;
+        }
         grouped.set(route.workspaceId, [
           ...(grouped.get(route.workspaceId) ?? []),
           route.backendId,
         ]);
       }
+      // Reject a missing or stale retained source before changing membership on
+      // any live backend. The later common fence covers intervening changes.
+      for (const entry of retained)
+        await this.retainedTimelineAgent(entry.workspace, entry.agentId);
       for (const id of new Set([...this.connections.keys(), ...grouped.keys()])) {
-        const workspace = active.find((w) => w.metadata.name === id);
+        const workspace = active.find(
+          (w) => w.metadata.name === id && w.spec.residency === "Running",
+        );
         if (!workspace) continue;
         const connection = await this.connection(workspace);
+        if (this.options.agentRouting) {
+          for (const agentId of grouped.get(id) ?? [])
+            await this.options.agentRouting.resolveAgent(agentId, [workspace]);
+        }
+        const current = (await this.records()).workspaces.find((row) => row.metadata.name === id);
+        if (
+          !current ||
+          current.metadata.uid !== workspace.metadata.uid ||
+          current.spec.residency !== "Running" ||
+          current.status?.phase !== "Ready"
+        )
+          throw new Error("Timeline workspace is stopped or replaced; reconnect before acting");
         await connection.backend.request({
           type: message.type,
           requestId: randomUUID(),
           agentIds: grouped.get(id) ?? [],
         });
       }
+      // A stopped agent has no daemon stream to subscribe to. Its retained
+      // membership is valid only while the exact authorized UID and snapshot
+      // remain present; the subsequent timeline fetch reports unavailable.
+      if (retained.length) {
+        // A prior target can change while a later target's record is read.
+        // Fence the whole acknowledged membership against one fresh authority
+        // view after every awaited retained lookup.
+        if (this.options.agentRouting) {
+          for (const entry of retained)
+            await this.options.agentRouting.resolveAgent(entry.agentId, [entry.workspace]);
+        }
+        const current = (await this.records()).workspaces;
+        for (const { workspace } of retained) {
+          const row = current.find((item) => item.metadata.name === workspace.metadata.name);
+          if (
+            !row ||
+            row.metadata.uid !== workspace.metadata.uid ||
+            row.spec.projectRef !== workspace.spec.projectRef ||
+            row.spec.credentialProfile !== workspace.spec.credentialProfile ||
+            row.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
+            row.spec.residency !== workspace.spec.residency ||
+            row.status?.phase !== workspace.status?.phase ||
+            row.spec.residency === "Running" ||
+            row.status?.storageDeletedAt
+          )
+            throw new Error("Retained timeline workspace stopped, replaced, or access revoked");
+        }
+      }
+      if (this.closed) return;
       this.options.emit({
         type: "agent.timeline.set_subscription.response",
         payload: { requestId, agentIds: message.agentIds },
       });
       return;
     }
-    if (message.type === "fetch_agent_request" && message.agentId.includes("~")) {
-      const route = parseScopedId(message.agentId);
+    if (
+      message.type === "fetch_agent_timeline_request" &&
+      (this.options.agentRouting || message.agentId.includes("~"))
+    ) {
+      const resolved = this.options.agentRouting
+        ? await this.options.agentRouting.resolveAgent(message.agentId, workspaces)
+        : undefined;
+      const route = resolved
+        ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+        : parseScopedId(message.agentId);
       const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
-      if (workspace?.spec.residency === "Archived" && this.options.inventoryStore) {
-        const entry = (await readArchivedInventory(this.options.inventoryStore, workspace)).find(
-          (row) => row.agent.id === message.agentId,
+      if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
+      if (workspace.spec.residency !== "Running") {
+        const agent = await this.retainedTimelineAgent(
+          workspace,
+          this.options.agentRouting ? route.backendId : message.agentId,
+        );
+        this.options.emit({
+          type: "fetch_agent_timeline_response",
+          payload: {
+            requestId,
+            agentId: message.agentId,
+            agent,
+            direction: message.direction ?? "tail",
+            projection: message.projection ?? "projected",
+            epoch: "",
+            reset: false,
+            staleCursor: false,
+            gap: false,
+            window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
+            startCursor: null,
+            endCursor: null,
+            hasOlder: false,
+            hasNewer: false,
+            entries: [],
+            error:
+              workspace.spec.retentionPolicy?.storage === "Ephemeral"
+                ? "Workspace is stopped; ephemeral storage was released and retained metadata has no transcript"
+                : "Workspace is stopped; transcript is unavailable while compute is stopped, and retained metadata has no history",
+          },
+        });
+        return;
+      }
+    }
+    if (
+      message.type === "fetch_agent_request" &&
+      (message.agentId.includes("~") ||
+        (this.options.agentRouting && z.guid().safeParse(message.agentId).success))
+    ) {
+      const resolved = this.options.agentRouting
+        ? await this.options.agentRouting.resolveAgent(message.agentId, workspaces)
+        : undefined;
+      const route = resolved
+        ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+        : parseScopedId(message.agentId);
+      const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
+      if (
+        workspace &&
+        this.options.inventoryStore &&
+        (workspace.spec.residency !== "Running" || workspace.status?.phase !== "Ready")
+      ) {
+        const entry = (
+          await readArchivedInventory(
+            this.options.inventoryStore,
+            workspace,
+            undefined,
+            workspace.spec.residency === "Archived" ? "archived" : "suspended",
+            this.options.agentRouting,
+          )
+        ).find(
+          (row) => row.agent.id === (this.options.agentRouting ? route.backendId : message.agentId),
         );
         this.options.emit({
           type: "fetch_agent_response",
@@ -650,18 +1412,31 @@ export class GatewaySession {
         });
         return;
       }
+      if (workspace) {
+        await this.forward(message, workspace);
+        return;
+      }
     }
     if (
       typeof record.agentId === "string" &&
       !record.agentId.includes("~") &&
+      (!this.options.agentRouting || !z.guid().safeParse(record.agentId).success) &&
       message.type !== "agent.create.request"
     ) {
       const query = record.agentId;
       const matches: Extract<SessionOutboundMessage, { type: "fetch_agent_response" }>[] = [];
       for (const workspace of workspaces) {
-        if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
-          for (const entry of await readArchivedInventory(this.options.inventoryStore, workspace)) {
-            const id = parseScopedId(entry.agent.id).backendId;
+        if (workspace.spec.residency !== "Running" && this.options.inventoryStore) {
+          for (const entry of await readArchivedInventory(
+            this.options.inventoryStore,
+            workspace,
+            undefined,
+            workspace.spec.residency === "Archived" ? "archived" : "suspended",
+            this.options.agentRouting,
+          )) {
+            const id = this.options.agentRouting
+              ? entry.agent.id
+              : parseScopedId(entry.agent.id).backendId;
             if (id.startsWith(query) || entry.agent.title?.toLowerCase() === query.toLowerCase())
               matches.push({
                 type: "fetch_agent_response",
@@ -681,7 +1456,7 @@ export class GatewaySession {
           throw new Error("Unexpected agent lookup response");
         if (reply.payload.agent) {
           const translated = SessionOutboundMessageSchema.parse(
-            translate(reply, workspace, connection.localId, "out"),
+            await this.project(reply, workspace, connection.localId),
           );
           if (translated.type === "fetch_agent_response")
             matches.push({ ...translated, payload: { ...translated.payload, requestId } });
@@ -709,27 +1484,156 @@ export class GatewaySession {
       if (message.worktree || message.worktreeName || message.git)
         throw new Error("Create workspaces through the cluster workspace operation first");
     }
+    if (message.type === "checkout_status_request" && message.cwd.startsWith("/projects/")) {
+      const project = projectForCatalogPath(message.cwd, projects);
+      if (!project) throw new Error("Project checkout is not authorized or configured");
+      const catalog = this.options.providerCatalog;
+      if (!catalog) throw new Error("Project checkout discovery is unavailable");
+      const status = await this.scopedCheckoutStatus(catalog, project);
+      // A timed-out checkout RPC is not allowed to emit a late success. The
+      // shared catalog probe continues and can satisfy a subsequent request.
+      if (checkoutDeadline !== undefined && Date.now() >= checkoutDeadline)
+        throw new Error("Project checkout discovery timed out; retry shortly");
+      if (this.closed) return;
+      this.options.emit({
+        type: "checkout_status_response",
+        payload: {
+          ...status,
+          cwd: projectPath(project.metadata.name),
+          requestId: message.requestId,
+        },
+      });
+      return;
+    }
+    if (
+      (message.type === "branch_suggestions_request" ||
+        message.type === "validate_branch_request") &&
+      message.cwd.startsWith("/projects/")
+    ) {
+      const project = projectForCatalogPath(message.cwd, projects);
+      if (!project) throw new Error("Project ref source is not authorized or configured");
+      const query: ProjectRefQuery =
+        message.type === "branch_suggestions_request"
+          ? { mode: "suggest", query: message.query, limit: message.limit }
+          : { mode: "validate", branchName: message.branchName };
+      const result = await this.scopedProjectRefs(project, query);
+      if (checkoutDeadline !== undefined && Date.now() >= checkoutDeadline)
+        throw new Error("Project ref inspection timed out; retry shortly");
+      if (this.closed) return;
+      if (result.mode === "suggest") {
+        this.options.emit({
+          type: "branch_suggestions_response",
+          payload: {
+            requestId: message.requestId,
+            branches: result.refs,
+            branchDetails: result.refs.map((name) => ({
+              name,
+              committerDate: 0,
+              hasLocal: false,
+              hasRemote: true,
+            })),
+            error: null,
+          },
+        });
+      } else {
+        this.options.emit({
+          type: "validate_branch_response",
+          payload: {
+            requestId: message.requestId,
+            exists: result.exists,
+            resolvedRef:
+              result.exists && query.mode === "validate"
+                ? `origin/${normalizeProjectBranchName(query.branchName)}`
+                : null,
+            isRemote: result.exists,
+            error: result.valid ? null : "Invalid Git branch name",
+          },
+        });
+      }
+      return;
+    }
     if (providerRequests.has(message.type)) {
-      const workspace =
+      if (typeof record.cwd === "string" && record.cwd.startsWith("/projects/")) {
+        const project = projectForCatalogPath(record.cwd, projects);
+        if (!project) throw new Error("Provider catalog project is not authorized or configured");
+        const catalog = this.options.providerCatalog;
+        if (!catalog) throw new Error("Project provider discovery is unavailable");
+        if (!project.metadata.uid) throw new Error("Provider catalog Project UID is unavailable");
+        const previousWatch = this.providerWatches.get(project.metadata.name);
+        if (previousWatch?.projectUid !== project.metadata.uid) {
+          previousWatch?.release();
+          const projectUid = project.metadata.uid;
+          const release = catalog.watch(project.metadata.name, () => {
+            void (async () => {
+              if (this.closed) return;
+              const current = projectForCatalogPath(
+                projectPath(project.metadata.name),
+                (await this.records()).projects,
+              );
+              if (!current || current.metadata.uid !== projectUid) return;
+              const entries = await this.scopedProviderSnapshot(catalog, current);
+              if (!this.closed)
+                this.options.emit({
+                  type: "providers_snapshot_update",
+                  payload: {
+                    cwd: projectPath(current.metadata.name),
+                    entries,
+                    generatedAt: new Date().toISOString(),
+                  },
+                });
+            })().catch(() => {});
+          });
+          this.providerWatches.set(project.metadata.name, { projectUid, release });
+        }
+        if (message.type === "get_providers_snapshot_request") {
+          const entries = await this.scopedProviderSnapshot(catalog, project);
+          this.options.emit({
+            type: "get_providers_snapshot_response",
+            payload: {
+              requestId,
+              cwd: projectPath(project.metadata.name),
+              entries,
+              generatedAt: new Date().toISOString(),
+            },
+          });
+          return;
+        }
+        if (message.type === "refresh_providers_snapshot_request") {
+          await this.scopedProviderSnapshot(catalog, project, true);
+          this.options.emit({
+            type: "refresh_providers_snapshot_response",
+            payload: { requestId, acknowledged: true },
+          });
+          return;
+        }
+        throw new Error("Project-scoped provider operation requires a workspace");
+      }
+      const selected =
         typeof record.cwd === "string"
           ? selectWorkspace(record, active)
           : active.find((w) => w.status?.phase === "Ready");
-      if (!workspace) {
-        if (
-          message.type === "get_providers_snapshot_request" ||
-          message.type === "refresh_providers_snapshot_request"
-        ) {
+      if (!selected) {
+        if (message.type === "get_providers_snapshot_request") {
           this.options.emit({
-            type:
-              message.type === "get_providers_snapshot_request"
-                ? "get_providers_snapshot_response"
-                : "refresh_providers_snapshot_response",
+            type: "get_providers_snapshot_response",
             payload: { requestId, entries: [], generatedAt: new Date().toISOString() },
+          });
+          return;
+        }
+        if (message.type === "refresh_providers_snapshot_request") {
+          this.options.emit({
+            type: "refresh_providers_snapshot_response",
+            payload: { requestId, acknowledged: true },
           });
           return;
         }
         throw new Error("Create a workspace and wait for readiness before querying providers");
       }
+      const workspace =
+        typeof record.cwd === "string" && record.cwd.startsWith("/workspaces/")
+          ? await this.readyForProviderSnapshot(selected, this.projectFor(selected, projects))
+          : selected;
+      if (this.closed) return;
       await this.forward(message, workspace);
       return;
     }
@@ -748,18 +1652,56 @@ export class GatewaySession {
     ) {
       record.workspaceId = this.subscriptions.get(record.subscriptionId);
     }
-    const workspace = selectWorkspace(record, active);
-    await this.forward(message, workspace);
+    const routed = this.options.agentRouting
+      ? SessionInboundMessageSchema.parse(
+          await this.options.agentRouting.route(message, workspaces),
+        )
+      : message;
+    const workspace = selectWorkspace(object(routed), active);
+    await this.forward(routed, workspace);
   }
 
   private async forward(message: SessionInboundMessage, workspace: Workspace) {
+    const validate = async () => {
+      const { workspaces } = await this.records();
+      const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
+      if (
+        !current ||
+        current.metadata.uid !== workspace.metadata.uid ||
+        current.metadata.deletionTimestamp ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready"
+      )
+        throw new Error("Workspace is stopped or replaced; reconnect before acting");
+    };
+    await validate();
     const connection = await this.connection(workspace);
-    const input = SessionInboundMessageSchema.parse(
-      translate(message, workspace, connection.localId, "in"),
+    const routed = this.options.agentRouting
+      ? SessionInboundMessageSchema.parse(
+          await this.options.agentRouting.route(message, [workspace]),
+        )
+      : message;
+    if (message.type === "file_download_token_request") {
+      const root = workspacePath(workspace.metadata.name);
+      const path = posix.normalize(message.path);
+      if (!posix.isAbsolute(message.path) || (path !== root && !path.startsWith(`${root}/`)))
+        throw new Error("Download path is outside the selected workspace");
+      if (!this.options.downloadHandles) throw new Error("Gateway download routing is unavailable");
+    }
+    let input = SessionInboundMessageSchema.parse(
+      translate(routed, workspace, connection.localId, "in"),
     );
+    if (input.type === "send_agent_message_request")
+      input = await this.uploads.replace(input, connection.backend, validate);
+    await validate();
+    if (this.options.agentRouting) {
+      // A UUID can be quarantined by another session while connect/upload waits.
+      await this.options.agentRouting.route(routed, [workspace]);
+    }
+    // The final durable identity read can await Kubernetes. Recheck principal and
+    // exact workspace state after it, immediately before sending the mutation.
+    await validate();
     const record = object(message);
-    if (message.type === "file.upload.request" && typeof record.requestId === "string")
-      this.uploads.set(record.requestId, workspace.metadata.name);
     if (typeof record.subscriptionId === "string")
       this.subscriptions.set(record.subscriptionId, workspace.metadata.name);
     if (
@@ -777,47 +1719,114 @@ export class GatewaySession {
       return;
     }
     const reply = await connection.backend.request(input);
-    const result = object(translate(reply, workspace, connection.localId, "out"));
-    if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
-      object(result.payload).slot = this.slots.outward(workspace.metadata.name, reply.payload.slot);
-    }
-    this.options.emit(result);
+    await connection.enqueue(async () => {
+      const result = object(await this.project(reply, workspace, connection.localId));
+      if (reply.type === "file_download_token_response" && reply.payload.token) {
+        const handles = this.options.downloadHandles;
+        if (!handles) throw new Error("Gateway download routing is unavailable");
+        object(result.payload).token = handles.issue({
+          workspace,
+          principal: this.options.principal ?? { kind: "owner" },
+          backendToken: reply.payload.token,
+          mimeType: reply.payload.mimeType,
+          fileName: reply.payload.fileName,
+          size: reply.payload.size,
+        });
+      }
+      if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
+        object(result.payload).slot = this.slots.outward(
+          workspace.metadata.name,
+          reply.payload.slot,
+        );
+      }
+      this.options.emit(result);
+    });
   }
 
   async binary(data: Uint8Array) {
-    await this.records();
+    const { workspaces } = await this.records();
     const terminal = decodeTerminalStreamFrame(data);
     if (terminal) {
       const route = this.slots.inward(terminal.slot);
       const connection = await this.connections.get(route.workspaceId);
       if (!connection) throw new Error("Terminal workspace is disconnected");
+      const current = workspaces.find((row) => row.metadata.name === route.workspaceId);
+      if (
+        !current ||
+        current.metadata.uid !== connection.workspace.metadata.uid ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready"
+      )
+        throw new Error("Terminal workspace is stopped or replaced");
       connection.backend.binary(
         encodeTerminalStreamFrame({ ...terminal, slot: route.backendSlot }),
       );
       return;
     }
     const file = decodeFileTransferFrame(data);
-    const route = file && this.uploads.get(file.requestId);
-    const connection = route ? await this.connections.get(route) : undefined;
-    if (!connection) throw new Error("Unknown binary transfer");
-    connection.backend.binary(data);
-    if (file?.opcode === 0x12) this.uploads.delete(file.requestId);
+    if (file && this.uploads.binary(data)) return;
+    throw new Error("Unknown binary transfer");
   }
 
   async refreshDirectory() {
-    if (this.closed || this.refreshing || !this.watchingWorkspaces) return;
+    if (this.closed || this.refreshing) return;
     this.refreshing = true;
     try {
       const { workspaces, projects } = await this.records();
       const active = workspaces.filter((w) => w.spec.residency !== "Archived");
+      for (const [id, entry] of this.connections) {
+        const connected = await entry.catch(() => undefined);
+        const current = active.find((workspace) => workspace.metadata.name === id);
+        if (
+          !current ||
+          !connected ||
+          current.spec.residency !== "Running" ||
+          current.status?.phase !== "Ready" ||
+          connected.workspace.metadata.uid !== current.metadata.uid
+        ) {
+          this.connections.delete(id);
+          this.workspaceRuntime.delete(id);
+          if (!connected) continue;
+          connected.retire();
+          await connected.backend.close();
+        }
+      }
+      for (const [id, interest] of this.providerInterests) {
+        if (Date.now() >= interest.expiresAt) {
+          this.providerInterests.delete(id);
+          continue;
+        }
+        const workspace = active.find((row) => row.metadata.name === id);
+        const project = projects.find((row) => row.metadata.name === workspace?.spec.projectRef);
+        if (
+          !workspace ||
+          workspace.metadata.uid !== interest.workspaceUid ||
+          workspace.spec.credentialProfile !== interest.credentialProfile ||
+          !project ||
+          project.metadata.uid !== interest.projectUid ||
+          JSON.stringify(project.spec) !== interest.projectSpec ||
+          workspace.status?.phase === "Failed"
+        ) {
+          this.providerInterests.delete(id);
+          continue;
+        }
+        if (workspace.status?.phase !== "Ready" || interest.publishing) continue;
+        interest.publishing = true;
+        void this.publishPendingProviderCatalog(workspace, interest).catch(() => {});
+      }
+      if (!this.watchingWorkspaces) return;
+      const labels = await this.labels?.workspaceLabelsMany(active);
       for (const workspace of active) {
         if (workspace.spec.residency === "Running" && workspace.status?.phase === "Ready")
           await this.connection(workspace);
         const descriptor = workspaceDescriptor(
           workspace,
           this.projectFor(workspace, projects),
-          this.workspaceRuntime.get(workspace.metadata.name),
+          workspace.spec.residency === "Running" && workspace.status?.phase === "Ready"
+            ? this.workspaceRuntime.get(workspace.metadata.name)
+            : undefined,
         );
+        descriptor.labels = labels?.get(workspace.metadata.name) ?? [];
         const serialized = JSON.stringify(descriptor);
         if (this.workspaceProjections.get(workspace.metadata.name) === serialized) continue;
         this.workspaceProjections.set(workspace.metadata.name, serialized);
@@ -847,6 +1856,15 @@ export class GatewaySession {
               },
             });
         }
+    } catch (error) {
+      const connected = await Promise.allSettled([...this.connections.values()]);
+      this.connections.clear();
+      for (const result of connected)
+        if (result.status === "fulfilled") {
+          result.value.retire();
+          await result.value.backend.close().catch(() => {});
+        }
+      throw error;
     } finally {
       this.refreshing = false;
     }
@@ -854,13 +1872,26 @@ export class GatewaySession {
 
   async close() {
     this.closed = true;
+    this.closeController.abort();
+    this.providerInterests.clear();
+    for (const watch of this.providerWatches.values()) watch.release();
+    this.providerWatches.clear();
+    this.labels?.releaseEmitter(this.options.emit);
     this.options.operations?.close?.(this.options.emit);
     await Promise.allSettled(
-      [...this.connections.values()].map(async (entry) => (await entry).backend.close()),
+      [...this.connections.values()].map(async (entry) => {
+        const connection = await entry;
+        connection.retire();
+        await connection.backend.close();
+      }),
     );
     this.connections.clear();
     this.workspaceRuntime.clear();
     this.uploads.clear();
     this.subscriptions.clear();
+  }
+
+  invalidateAgentDirectory() {
+    this.options.disconnect();
   }
 }

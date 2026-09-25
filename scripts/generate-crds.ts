@@ -119,6 +119,42 @@ function profileValidations(root: SchemaNode) {
   valueReference(property(spec, "git", "ssh", "knownHostsRef"));
   rules(spec, [
     {
+      rule: "!has(self.codexSubscription) || self.codexSubscription.authSecretRef.name != self.codexSubscription.outputSecretName",
+      message: "Codex authority and access Secrets must differ",
+    },
+    {
+      rule: "!has(self.codexSubscription) || self.codexSubscription.authSecretRef.key != 'paseo-access.json'",
+      message: "Codex authority key collides with broker metadata",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.env) || self.env.all(e, !(e.name in ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'OPENAI_FEDERATION_RULE_ID', 'OPENAI_IDENTITY_TOKEN_FILE']))",
+      message: "Codex subscription authority cannot mix authentication modes",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.env) || self.env.all(e, !has(e.valueFrom.secretKeyRef) || e.valueFrom.secretKeyRef.name != self.codexSubscription.authSecretRef.name)",
+      message: "Codex authority cannot be projected as environment",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.files) || self.files.all(f, !has(f.valueFrom.secretKeyRef) || f.valueFrom.secretKeyRef.name != self.codexSubscription.authSecretRef.name)",
+      message: "Codex authority cannot be projected as a worker file",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.git) || !has(self.git.tokenSecretRef) || self.git.tokenSecretRef.name != self.codexSubscription.authSecretRef.name",
+      message: "Codex authority cannot be projected as a Git token",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.git) || !has(self.git.ssh) || (self.git.ssh.keySecretRef.name != self.codexSubscription.authSecretRef.name && (!has(self.git.ssh.knownHostsRef.secretKeyRef) || self.git.ssh.knownHostsRef.secretKeyRef.name != self.codexSubscription.authSecretRef.name))",
+      message: "Codex authority cannot be projected as SSH material",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.git) || !has(self.git.signing) || self.git.signing.keySecretRef.name != self.codexSubscription.authSecretRef.name",
+      message: "Codex authority cannot be projected as a signing key",
+    },
+    {
+      rule: "!has(self.codexSubscription) || !has(self.git) || !has(self.git.githubApp) || (self.git.githubApp.outputSecretName != self.codexSubscription.authSecretRef.name && self.git.githubApp.outputSecretName != self.codexSubscription.outputSecretName)",
+      message: "GitHub App and Codex authority/access outputs must be distinct",
+    },
+    {
       rule: "!has(self.git) || !(has(self.git.tokenSecretRef) && has(self.git.githubApp))",
       message: "Choose a static token or GitHub App, not both",
     },

@@ -24,13 +24,25 @@ const RunStateSchema = z.object({
   scheduleId: z.string(),
   projectId: z.string(),
   credentialProfile: z.string(),
+  targetWorkspaceUid: z.string().optional(),
+  // Capture cleanup policy at fire time; old records retain the previous archive behavior.
+  archiveOnFinish: z.boolean().default(true),
   phase: z.enum(["dispatching", "running", "finished", "unknown"]),
   run: ScheduleRunSchema,
+});
+const OriginSchema = z.object({
+  workspaceId: z.string(),
+  workspaceUid: z.string(),
+  expiresAt: z.number().int(),
+  tokenId: z.string(),
 });
 const ScheduleStateSchema = z.object({
   schedule: StoredScheduleSchema,
   projectId: z.string(),
   credentialProfile: z.string(),
+  targetWorkspaceId: z.string().optional(),
+  targetWorkspaceUid: z.string().optional(),
+  origin: OriginSchema.optional(),
   concurrency: z.enum(["Forbid", "Allow"]),
   totalRuns: z.number().int().nonnegative(),
   reservations: z.array(RunStateSchema).max(16),
@@ -42,6 +54,9 @@ export interface ScheduleDispatch {
   runId: string;
   projectId: string;
   credentialProfile: string;
+  targetWorkspaceId?: string;
+  targetWorkspaceUid?: string;
+  origin?: z.infer<typeof OriginSchema>;
 }
 export interface ScheduleOutcome {
   status: "succeeded" | "failed";
@@ -51,8 +66,22 @@ export interface ScheduleOutcome {
 export interface ScheduleOptions {
   records: RecordStore;
   store: Store;
+  resolveAgent?: (
+    agentId: string,
+    principal: GatewayPrincipal,
+  ) => Promise<{
+    projectId: string;
+    credentialProfile: string;
+    workspaceId: string;
+    workspaceUid: string;
+  }>;
   dispatch(input: ScheduleDispatch): Promise<{ agentId: string; workspaceId: string }>;
-  observe?(input: { scheduleId: string; run: ScheduleRun }): Promise<ScheduleOutcome | undefined>;
+  observe?(input: {
+    scheduleId: string;
+    archiveOnFinish?: boolean;
+    run: ScheduleRun;
+    targetWorkspaceUid?: string;
+  }): Promise<ScheduleOutcome | undefined>;
   defaultConcurrency?: "Forbid" | "Allow";
   historyLimit?: number;
   maxInflightDispatches?: number;
@@ -192,11 +221,28 @@ export class ScheduleService {
       },
     };
   }
-  private async bind(schedule: StoredSchedule, principal: GatewayPrincipal) {
-    if (schedule.target.type !== "new-agent")
-      throw new Error(
-        "Gateway schedules require a new-agent target with a configured project or workspace cwd",
-      );
+  private async bind(
+    schedule: StoredSchedule,
+    principal: GatewayPrincipal,
+  ): Promise<{
+    projectId: string;
+    credentialProfile: string;
+    targetWorkspaceId?: string;
+    targetWorkspaceUid?: string;
+  }> {
+    if (schedule.target.type === "agent") {
+      if (!this.options.resolveAgent)
+        throw new Error("Existing-agent schedule lookup is unavailable");
+      const binding = await this.options.resolveAgent(schedule.target.agentId, principal);
+      if (!allowed(principal, binding)) throw new Error("Schedule target access denied");
+      this.validateSchedule(schedule);
+      return {
+        projectId: binding.projectId,
+        credentialProfile: binding.credentialProfile,
+        targetWorkspaceId: binding.workspaceId,
+        targetWorkspaceUid: binding.workspaceUid,
+      };
+    }
     const [projects, workspaces] = await Promise.all([
       this.options.store.projects(),
       this.options.store.workspaces(),
@@ -219,10 +265,7 @@ export class ScheduleService {
     const binding = { projectId: project.metadata.name, credentialProfile };
     if (!allowed(principal, binding))
       throw new Error("Credential profile is outside the caller scope");
-    if (schedule.prompt.length > 65536) throw new Error("Schedule prompt exceeds 64 KiB");
-    if (schedule.expiresAt && !Number.isFinite(Date.parse(schedule.expiresAt)))
-      throw new Error("Invalid schedule expiration");
-    nextScheduleTime(schedule.cadence, this.now());
+    this.validateSchedule(schedule);
     // Nested advanced agent configuration is not safely expressible in the lifecycle adapter yet.
     if (
       schedule.target.config.systemPrompt ||
@@ -232,6 +275,12 @@ export class ScheduleService {
     )
       throw new Error("Advanced agent configuration is not supported for gateway schedules");
     return binding;
+  }
+  private validateSchedule(schedule: StoredSchedule) {
+    if (schedule.prompt.length > 65536) throw new Error("Schedule prompt exceeds 64 KiB");
+    if (schedule.expiresAt && !Number.isFinite(Date.parse(schedule.expiresAt)))
+      throw new Error("Invalid schedule expiration");
+    nextScheduleTime(schedule.cadence, this.now());
   }
   async handle(
     message: SessionInboundMessage,
@@ -262,8 +311,6 @@ export class ScheduleService {
       return true;
     }
     if (input.type === "schedule/create") {
-      if (input.target.type !== "new-agent")
-        throw new Error("Gateway schedules require a new-agent target");
       const now = this.now().toISOString();
       const schedule = StoredScheduleSchema.parse({
         id: randomUUID(),
@@ -288,6 +335,16 @@ export class ScheduleService {
         value: {
           schedule,
           ...binding,
+          ...(principal.kind === "workspace"
+            ? {
+                origin: {
+                  workspaceId: principal.originWorkspaceId,
+                  workspaceUid: principal.originWorkspaceUid,
+                  expiresAt: principal.expiresAt,
+                  tokenId: principal.tokenId,
+                },
+              }
+            : {}),
           concurrency: this.options.defaultConcurrency ?? "Forbid",
           totalRuns: 0,
           reservations: [],
@@ -355,7 +412,8 @@ export class ScheduleService {
         const binding = await this.bind(schedule, principal);
         if (
           binding.projectId !== state.projectId ||
-          binding.credentialProfile !== state.credentialProfile
+          binding.credentialProfile !== state.credentialProfile ||
+          binding.targetWorkspaceUid !== state.targetWorkspaceUid
         )
           throw new Error("Create a new schedule to change project or credential profile");
         schedule.updatedAt = this.now().toISOString();
@@ -477,6 +535,11 @@ export class ScheduleService {
       scheduleId: id,
       projectId: state.projectId,
       credentialProfile: state.credentialProfile,
+      targetWorkspaceUid: state.targetWorkspaceUid,
+      archiveOnFinish:
+        schedule.target.type === "new-agent"
+          ? (schedule.target.config.archiveOnFinish ?? true)
+          : true,
       phase: "dispatching",
       run: {
         id: runId,
@@ -514,6 +577,9 @@ export class ScheduleService {
         runId,
         projectId: state.projectId,
         credentialProfile: state.credentialProfile,
+        targetWorkspaceId: state.targetWorkspaceId,
+        targetWorkspaceUid: state.targetWorkspaceUid,
+        origin: state.origin,
       });
       run.run = ScheduleRunSchema.parse({ ...run.run, ...result });
       run.phase = "running";
@@ -586,7 +652,12 @@ export class ScheduleService {
     )
       return;
     const task = (async () => {
-      const outcome = await observer({ scheduleId: state.scheduleId, run: state.run });
+      const outcome = await observer({
+        scheduleId: state.scheduleId,
+        archiveOnFinish: state.archiveOnFinish,
+        run: state.run,
+        targetWorkspaceUid: state.targetWorkspaceUid,
+      });
       if (outcome) await this.completeRun(state.run.id, outcome);
     })();
     this.track(this.observations, state.run.id, task, "schedule_observation_failed");

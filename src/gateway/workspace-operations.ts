@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   AgentSnapshotPayloadSchema,
+  CreationSnapshotSchema,
   type SessionInboundMessage,
   SessionInboundMessageSchema,
   type SessionOutboundMessage,
@@ -22,7 +23,12 @@ import {
 } from "../domain.js";
 import type { ControlRecord, RecordStore } from "../kubernetes/records.js";
 import { type Store, statusCode } from "../kubernetes/store.js";
-import { archiveAgentInventory, retainedAgentMetadata } from "./agent-inventory.js";
+import {
+  archiveAgentInventory,
+  readArchivedInventory,
+  retainedAgentMetadata,
+} from "./agent-inventory.js";
+import type { AgentRouting } from "./agent-routing.js";
 import {
   authorizeProject,
   authorizeWorkspace,
@@ -32,8 +38,10 @@ import {
 import { type Backend, PaseoBackend } from "./backend.js";
 import { workspaceDescriptor } from "./catalog.js";
 import { CreationJournal, type CreationProgress } from "./creation-journal.js";
+import { checkedOutBranchName, fetchRevisionForRef } from "./project-ref-selection.js";
 import { object, translate } from "./routing.js";
 import { ScheduleDispatchRejected } from "./schedules.js";
+import type { UploadStaging } from "./uploads.js";
 
 type CreateWorkspace = Extract<SessionInboundMessage, { type: "workspace.create.request" }>;
 type CreateAgent = Extract<
@@ -51,10 +59,13 @@ export interface WorkspaceOperationsOptions {
   store: Store & RecordStore;
   namespace: string;
   backendPassword: string;
+  backendSecure?: boolean;
+  agentRouting?: AgentRouting;
   admission: WorkspaceAdmission;
   readyTimeoutMs?: number;
   pollMs?: number;
   scheduleRetentionSeconds?: number;
+  revokedTokenIds?: ReadonlySet<string>;
   backendFactory?: (workspace: Workspace, emit: Emit) => Backend;
 }
 const owner: GatewayPrincipal = { kind: "owner" };
@@ -80,23 +91,104 @@ function retainedCreationResponse(response: SessionOutboundMessage): SessionOutb
 export class WorkspaceOperations {
   readonly creationLifecycle = true;
   private readonly journal: CreationJournal;
+  private backfillInFlight?: Promise<void>;
   constructor(private readonly options: WorkspaceOperationsOptions) {
-    this.journal = new CreationJournal(options.store, async (principal, identity) => {
-      const { workspaces } = await this.records(principal);
-      if (identity) {
-        const row = workspaces.find(
+    this.journal = new CreationJournal(
+      options.store,
+      async (principal, identity) => {
+        const { workspaces } = await this.records(principal);
+        if (identity) {
+          const row = workspaces.find(
+            (row) =>
+              row.metadata.name === identity.workspaceId &&
+              row.metadata.uid === identity.workspaceUid,
+          );
+          if (!row || !authorizeWorkspace(principal, row))
+            throw new Error("Creation workspace access denied");
+        }
+      },
+      async (snapshot, principal, identity) => {
+        if (!options.agentRouting || (!snapshot.agent && !snapshot.agentId)) return snapshot;
+        if (!identity) throw new Error("Creation identity has no UID-bound workspace");
+        const { workspaces } = await this.records(principal);
+        const workspace = workspaces.find(
           (row) =>
             row.metadata.name === identity.workspaceId &&
-            row.metadata.uid === identity.workspaceUid,
+            row.metadata.uid === identity.workspaceUid &&
+            authorizeWorkspace(principal, row),
         );
-        if (!row || !authorizeWorkspace(principal, row))
-          throw new Error("Creation workspace access denied");
-      }
-    });
+        if (!workspace) throw new Error("Creation workspace access denied");
+        return CreationSnapshotSchema.parse(
+          await options.agentRouting.project(snapshot, workspace),
+        );
+      },
+    );
   }
 
   close(emit: Emit) {
     this.journal.close(emit);
+  }
+
+  /** Before honoring a caller-chosen GUID, claim every discoverable pre-upgrade
+   * agent from its UID-bound source. An unavailable source blocks that create.
+   * Gateway-generated random GUIDs do not require this global scan.
+   */
+  async backfillAgentIdentities() {
+    const agentRouting = this.options.agentRouting;
+    if (!agentRouting) return;
+    if (this.backfillInFlight) return this.backfillInFlight;
+    const task = (async () => {
+      const workspaces = await this.options.store.workspaces();
+      for (const workspace of workspaces) {
+        if (!workspace.metadata.uid || workspace.metadata.deletionTimestamp)
+          throw new Error("Agent identity backfill is incomplete");
+        if (workspace.status?.storageDeletedAt)
+          throw new Error("Agent identity backfill cannot verify purged workspace history");
+        if (workspace.spec.residency === "Running" && workspace.status?.phase !== "Ready")
+          throw new Error("Agent identity backfill cannot verify a restarting workspace");
+        if (workspace.spec.residency !== "Running") {
+          const retained = await readArchivedInventory(this.options.store, workspace);
+          for (const entry of retained)
+            await agentRouting.claim(workspace, parseScopedId(entry.agent.id).backendId);
+          continue;
+        }
+        const { backend } = await this.backend(workspace, () => {});
+        try {
+          let cursor: string | undefined;
+          const seenCursors = new Set<string>();
+          do {
+            const response = await backend.request({
+              type: "fetch_agents_request",
+              requestId: randomUUID(),
+              filter: { includeArchived: true },
+              page: { limit: 200, ...(cursor ? { cursor } : {}) },
+            });
+            if (response.type !== "fetch_agents_response")
+              throw new Error("Agent identity backfill returned an invalid inventory");
+            for (const entry of response.payload.entries)
+              await agentRouting.claim(workspace, entry.agent.id);
+            cursor = response.payload.pageInfo.hasMore
+              ? (response.payload.pageInfo.nextCursor ?? undefined)
+              : undefined;
+            if (response.payload.pageInfo.hasMore && !cursor)
+              throw new Error("Agent identity backfill inventory lacks a continuation cursor");
+            if (cursor) {
+              if (seenCursors.has(cursor) || seenCursors.size >= 100)
+                throw new Error("Agent identity backfill inventory exceeds its page limit");
+              seenCursors.add(cursor);
+            }
+          } while (cursor);
+        } finally {
+          await backend.close();
+        }
+      }
+    })();
+    this.backfillInFlight = task;
+    try {
+      await task;
+    } finally {
+      this.backfillInFlight = undefined;
+    }
   }
 
   private async records(principal: GatewayPrincipal) {
@@ -143,20 +235,14 @@ export class WorkspaceOperations {
       throw new Error("Only GitHub pull-request checkout is supported");
     if (source.kind === "worktree" && source.checkoutSource?.projectPath)
       throw new Error("Cross-repository pull-request checkout is not supported");
-    const revision =
+    const revision = fetchRevisionForRef(
       source.kind === "worktree"
         ? (source.baseBranch ?? source.refName ?? project.spec.revision)
-        : project.spec.revision;
+        : project.spec.revision,
+    );
     const pullRequest =
       source.kind === "worktree"
         ? (source.checkoutSource?.number ?? source.githubPrNumber)
-        : undefined;
-    const branch =
-      source.kind === "worktree"
-        ? (source.branchName ??
-          (source.action === "checkout" && !pullRequest
-            ? source.refName?.replace(/^origin\//, "")
-            : undefined))
         : undefined;
     const fingerprint = hash({
       projectId,
@@ -168,6 +254,15 @@ export class WorkspaceOperations {
     const name = message.idempotencyKey
       ? `w-${hash([this.options.namespace, projectId, message.idempotencyKey]).slice(0, 32)}`
       : `w-${randomUUID()}`;
+    const branch =
+      source.kind === "worktree"
+        ? (source.branchName ??
+          (source.action === "branch-off"
+            ? (source.worktreeSlug ?? `paseo/${name}`)
+            : source.action === "checkout" && !pullRequest && source.refName
+              ? checkedOutBranchName(source.refName)
+              : undefined))
+        : undefined;
     const expected = WorkspaceSchema.parse({
       apiVersion: API_VERSION,
       kind: "PaseoWorkspace",
@@ -181,7 +276,7 @@ export class WorkspaceOperations {
         credentialProfile: project.spec.credentialProfile,
         displayName: message.title ?? name,
         residency: "Running",
-        revision: revision.replace(/^origin\//, ""),
+        revision,
         ...(branch ? { branch } : {}),
         ...(pullRequest ? { pullRequest } : {}),
         ...(source.kind === "worktree" ? { fetchDepth: 0 } : {}),
@@ -225,7 +320,7 @@ export class WorkspaceOperations {
     const backend =
       this.options.backendFactory?.(workspace, emit) ??
       new PaseoBackend(
-        `ws://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
+        `${this.options.backendSecure ? "wss" : "ws"}://${resourceName(workspace)}.${this.options.namespace}.svc:6767/ws`,
         this.options.backendPassword,
         { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
         () => {},
@@ -253,6 +348,7 @@ export class WorkspaceOperations {
     principal: GatewayPrincipal = owner,
     emit: Emit = () => {},
     progress?: CreationProgress,
+    uploads?: UploadStaging,
   ) {
     const { workspaces } = await this.records(principal);
     let workspaceId = message.workspaceId;
@@ -305,13 +401,22 @@ export class WorkspaceOperations {
     try {
       // Backend caller IDs are local to a pod. Preserve cross-pod parentage as the
       // upstream label instead of asking a different daemon to resolve that ID.
-      if (message.callerAgentId) {
-        const caller = parseScopedId(message.callerAgentId);
-        const origin = workspaces.find((row) => row.metadata.name === caller.workspaceId);
+      let callerAgentId = message.callerAgentId;
+      if (callerAgentId) {
+        const caller = this.options.agentRouting
+          ? await this.options.agentRouting.resolveAgent(
+              callerAgentId,
+              workspaces.filter((row) => authorizeWorkspace(principal, row)),
+            )
+          : parseScopedId(callerAgentId);
+        const callerWorkspaceId =
+          "workspace" in caller ? caller.workspace.metadata.name : caller.workspaceId;
+        const origin = workspaces.find((row) => row.metadata.name === callerWorkspaceId);
         if (!origin || !authorizeWorkspace(principal, origin))
           throw new Error("Caller agent workspace access denied");
+        if ("backendAgentId" in caller) callerAgentId = caller.backendAgentId;
       }
-      const input = SessionInboundMessageSchema.parse(
+      let input = SessionInboundMessageSchema.parse(
         translate(
           {
             ...message,
@@ -321,7 +426,7 @@ export class WorkspaceOperations {
             worktree: undefined,
             labels: {
               ...message.labels,
-              ...(message.callerAgentId ? { "paseo.parent-agent-id": message.callerAgentId } : {}),
+              ...(callerAgentId ? { "paseo.parent-agent-id": callerAgentId } : {}),
             },
           },
           workspace,
@@ -356,24 +461,52 @@ export class WorkspaceOperations {
             throw new Error(
               "Agent creation outcome unknown; inspect the workspace before retrying",
             );
-          const response = SessionOutboundMessageSchema.parse(previous.value.response);
+          const response = SessionOutboundMessageSchema.parse(
+            this.options.agentRouting
+              ? await this.options.agentRouting.project(previous.value.response, workspace)
+              : previous.value.response,
+          );
           if ("payload" in response && "requestId" in response.payload)
             response.payload.requestId = message.requestId;
           return response;
         }
       }
-      const current = (await this.records(principal)).workspaces.find(
-        (row) => row.metadata.name === workspaceId,
-      );
-      if (
-        !current ||
-        current.metadata.uid !== workspace.metadata.uid ||
-        !authorizeWorkspace(principal, current)
-      )
-        throw new Error("Creation workspace access denied");
+      const validate = async () => {
+        const current = (await this.records(principal)).workspaces.find(
+          (row) => row.metadata.name === workspaceId,
+        );
+        if (
+          !current ||
+          current.metadata.uid !== workspace.metadata.uid ||
+          current.metadata.deletionTimestamp ||
+          current.spec.residency !== "Running" ||
+          current.status?.phase !== "Ready" ||
+          !authorizeWorkspace(principal, current) ||
+          (principal.kind === "workspace" && this.options.revokedTokenIds?.has(principal.tokenId))
+        )
+          throw new Error("Creation workspace access denied or workspace changed");
+      };
+      await validate();
+      let reservedAgentId: string | undefined;
+      if (this.options.agentRouting && input.type === "agent.create.request") {
+        if (input.agentId) await this.backfillAgentIdentities();
+        reservedAgentId = await this.options.agentRouting.reserveForCreate(
+          workspace,
+          input.agentId ?? randomUUID(),
+        );
+        input = SessionInboundMessageSchema.parse({ ...input, agentId: reservedAgentId });
+      }
       await progress?.({}, undefined, true);
+      if (uploads) input = await uploads.replace(input, backend, validate);
+      await validate();
+      if (reservedAgentId)
+        await this.options.agentRouting?.resolveAgent(reservedAgentId, [workspace]);
+      await validate();
+      const translated = translate(await backend.request(input), workspace, localId, "out");
       const response = SessionOutboundMessageSchema.parse(
-        translate(await backend.request(input), workspace, localId, "out"),
+        this.options.agentRouting
+          ? await this.options.agentRouting.project(translated, workspace)
+          : translated,
       );
       if (receipt)
         await this.options.store.updateRecord({
@@ -434,7 +567,73 @@ export class WorkspaceOperations {
     }
   }
 
-  async handle(message: SessionInboundMessage, emit: Emit, principal: GatewayPrincipal) {
+  async snapshotSuspendedInventory(workspace: Workspace) {
+    const { backend, localId } = await this.backend(workspace, () => {});
+    try {
+      await archiveAgentInventory(this.options.store, backend, workspace, localId, "suspended");
+    } finally {
+      await backend.close();
+    }
+  }
+
+  /** Resolve a pinned bare UUID against exact backend IDs; the durable binding fences reuse. */
+  async resolveScheduleAgent(agentId: string, principal: GatewayPrincipal) {
+    const { workspaces } = await this.records(principal);
+    const candidates = workspaces.filter((row) => authorizeWorkspace(principal, row));
+    const matches: Workspace[] = [];
+    let unavailable = false;
+    for (const workspace of candidates) {
+      if (
+        workspace.metadata.deletionTimestamp ||
+        workspace.spec.residency !== "Running" ||
+        workspace.status?.phase !== "Ready"
+      ) {
+        unavailable = true;
+        continue;
+      }
+      let connection: Awaited<ReturnType<WorkspaceOperations["backend"]>>;
+      try {
+        connection = await this.backend(workspace, () => {});
+      } catch {
+        unavailable = true;
+        continue;
+      }
+      try {
+        const response = await connection.backend.request({
+          type: "fetch_agent_request",
+          requestId: randomUUID(),
+          agentId,
+        });
+        if (response.type !== "fetch_agent_response") throw new Error("Invalid agent lookup");
+        if (response.payload.agent?.id === agentId && !response.payload.agent.archivedAt)
+          matches.push(workspace);
+      } finally {
+        await connection.backend.close();
+      }
+    }
+    if (matches.length > 1) throw new Error("Scheduled target UUID is ambiguous across workspaces");
+    const workspace = matches[0];
+    if (!workspace && unavailable)
+      throw new Error("Scheduled target lookup is incomplete while workspaces are unavailable");
+    if (!workspace?.metadata.uid) throw new Error("Scheduled target agent does not exist");
+    if (this.options.agentRouting) {
+      await this.options.agentRouting.claim(workspace, agentId);
+      await this.options.agentRouting.resolveAgent(agentId, [workspace]);
+    }
+    return {
+      projectId: workspace.spec.projectRef,
+      credentialProfile: workspace.spec.credentialProfile,
+      workspaceId: workspace.metadata.name,
+      workspaceUid: workspace.metadata.uid,
+    };
+  }
+
+  async handle(
+    message: SessionInboundMessage,
+    emit: Emit,
+    principal: GatewayPrincipal,
+    uploads?: UploadStaging,
+  ) {
     if (message.type === "creation.subscribe.request") {
       const observed = await this.journal.subscribe(
         message.kind,
@@ -472,7 +671,7 @@ export class WorkspaceOperations {
         message.subscribe === true,
         async (progress) => {
           const finishAgent = async (input: CreateAgent) => {
-            const reply = await this.createAgent(input, principal, emit, progress);
+            const reply = await this.createAgent(input, principal, emit, progress, uploads);
             if (reply.type === "agent.create.response" && reply.payload.agent) {
               await progress({
                 phase: "agent_ready",
@@ -553,7 +752,7 @@ export class WorkspaceOperations {
       return true;
     }
     if (message.type === "create_agent_request") {
-      emit(await this.createAgent(message, principal, emit));
+      emit(await this.createAgent(message, principal, emit, undefined, uploads));
       return true;
     }
     if (message.type === "archive_workspace_request") {
@@ -577,9 +776,123 @@ export class WorkspaceOperations {
     runId: string;
     projectId: string;
     credentialProfile: string;
+    targetWorkspaceId?: string;
+    targetWorkspaceUid?: string;
+    origin?: {
+      workspaceId: string;
+      workspaceUid: string;
+      expiresAt: number;
+      tokenId: string;
+    };
   }) {
-    if (input.schedule.target.type !== "new-agent")
-      throw new Error("Only new-agent schedule targets are supported");
+    if (input.origin) {
+      const workspaces = await this.options.store.workspaces();
+      const source = workspaces.find((row) => row.metadata.name === input.origin?.workspaceId);
+      if (
+        !source ||
+        source.metadata.uid !== input.origin.workspaceUid ||
+        source.metadata.deletionTimestamp ||
+        source.spec.residency !== "Running" ||
+        input.origin.expiresAt <= Math.floor(Date.now() / 1000) ||
+        this.options.revokedTokenIds?.has(input.origin.tokenId)
+      )
+        throw new ScheduleDispatchRejected("Scheduled origin authorization expired or was revoked");
+    }
+    if (input.schedule.target.type === "agent") {
+      const workspace = (await this.options.store.workspaces()).find(
+        (row) => row.metadata.name === input.targetWorkspaceId,
+      );
+      if (
+        !workspace ||
+        !input.targetWorkspaceUid ||
+        workspace.metadata.uid !== input.targetWorkspaceUid ||
+        workspace.metadata.deletionTimestamp ||
+        workspace.spec.projectRef !== input.projectId ||
+        workspace.spec.credentialProfile !== input.credentialProfile ||
+        workspace.spec.residency !== "Running" ||
+        workspace.status?.phase !== "Ready"
+      )
+        throw new ScheduleDispatchRejected("Scheduled target workspace is unavailable or changed");
+      const backend = await this.backend(workspace, () => {}).catch((error) => {
+        throw new ScheduleDispatchRejected(
+          error instanceof Error ? error.message : "Scheduled target backend unavailable",
+        );
+      });
+      try {
+        const validateDispatch = async () => {
+          const latest = await this.options.store.workspaces();
+          const current = latest.find((row) => row.metadata.name === input.targetWorkspaceId);
+          const origin = input.origin
+            ? latest.find((row) => row.metadata.name === input.origin?.workspaceId)
+            : undefined;
+          if (
+            !current ||
+            current.metadata.uid !== input.targetWorkspaceUid ||
+            current.metadata.deletionTimestamp ||
+            current.spec.residency !== "Running" ||
+            current.status?.phase !== "Ready" ||
+            current.spec.projectRef !== input.projectId ||
+            current.spec.credentialProfile !== input.credentialProfile ||
+            (input.origin &&
+              (!origin ||
+                origin.metadata.uid !== input.origin.workspaceUid ||
+                origin.metadata.deletionTimestamp ||
+                origin.spec.residency !== "Running" ||
+                input.origin.expiresAt <= Math.floor(Date.now() / 1000) ||
+                this.options.revokedTokenIds?.has(input.origin.tokenId)))
+          )
+            throw new ScheduleDispatchRejected(
+              "Scheduled target or origin changed before dispatch",
+            );
+          return current;
+        };
+        const target = await backend.backend
+          .request({
+            type: "fetch_agent_request",
+            requestId: randomUUID(),
+            agentId: input.schedule.target.agentId,
+          })
+          .catch((error) => {
+            throw new ScheduleDispatchRejected(
+              error instanceof Error ? error.message : "Scheduled target lookup failed",
+            );
+          });
+        if (
+          target.type !== "fetch_agent_response" ||
+          target.payload.agent?.id !== input.schedule.target.agentId ||
+          target.payload.agent.archivedAt
+        )
+          throw new ScheduleDispatchRejected("Scheduled target agent is unavailable or archived");
+        const current = await validateDispatch();
+        if (this.options.agentRouting) {
+          await this.options.agentRouting.claim(current, input.schedule.target.agentId);
+          const route = await this.options.agentRouting.resolveAgent(
+            input.schedule.target.agentId,
+            [current],
+          );
+          if (route.workspace.metadata.uid !== input.targetWorkspaceUid)
+            throw new ScheduleDispatchRejected("Scheduled target agent identity changed");
+        }
+        await validateDispatch();
+        // After this mutation is sent, any lost response is ambiguous and is never retried.
+        const response = await backend.backend.request({
+          type: "send_agent_message_request",
+          requestId: input.runId,
+          agentId: input.schedule.target.agentId,
+          text: input.schedule.prompt,
+          messageId: input.runId,
+        });
+        if (
+          response.type !== "send_agent_message_response" ||
+          !response.payload.accepted ||
+          response.payload.error
+        )
+          throw new Error("Scheduled target message outcome is unknown");
+        return { workspaceId: workspace.metadata.name, agentId: input.schedule.target.agentId };
+      } finally {
+        await backend.backend.close();
+      }
+    }
     const project = (await this.options.store.projects()).find(
       (row) =>
         row.metadata.name === input.projectId &&
@@ -632,18 +945,24 @@ export class WorkspaceOperations {
       );
     return {
       workspaceId: workspace.metadata.name,
-      agentId: parseScopedId(response.payload.agent.id).backendId,
+      agentId: this.options.agentRouting
+        ? response.payload.agent.id
+        : parseScopedId(response.payload.agent.id).backendId,
     };
   }
 
   async observeSchedule(input: {
     scheduleId: string;
+    archiveOnFinish?: boolean;
     run: ScheduleRun;
+    targetWorkspaceUid?: string;
   }): Promise<{ status: "succeeded" | "failed"; output?: string; error?: string } | undefined> {
     if (!input.run.workspaceId || !input.run.agentId) return undefined;
     const workspace = (await this.options.store.workspaces()).find(
       (row) => row.metadata.name === input.run.workspaceId,
     );
+    if (input.targetWorkspaceUid && workspace?.metadata.uid !== input.targetWorkspaceUid)
+      return { status: "failed", error: "Scheduled target workspace was replaced" };
     if (!workspace || workspace.status?.phase === "Failed")
       return { status: "failed", error: workspace?.status?.message ?? "Workspace disappeared" };
     if (workspace.status?.phase !== "Ready") return undefined;
@@ -658,13 +977,59 @@ export class WorkspaceOperations {
       if (response.type !== "wait_for_finish_response")
         throw new Error("Unexpected scheduled agent observation");
       if (response.payload.status === "timeout") return undefined;
-      try {
-        await this.archive(workspace.metadata.name, owner);
-      } catch (error) {
-        return {
-          status: "failed",
-          error: `Agent completed but workspace teardown failed; compute and storage retained: ${error instanceof Error ? error.message : "unknown error"}`,
-        };
+      if (input.targetWorkspaceUid) {
+        type TimelineEntry = Extract<
+          SessionOutboundMessage,
+          { type: "fetch_agent_timeline_response" }
+        >["payload"]["entries"][number];
+        const entries: TimelineEntry[] = [];
+        let cursor: { epoch: string; seq: number } | undefined;
+        let found = false;
+        for (let page = 0; page < 10; page++) {
+          const timeline = await backend.request({
+            type: "fetch_agent_timeline_request",
+            requestId: randomUUID(),
+            agentId: input.run.agentId,
+            direction: cursor ? "before" : "tail",
+            ...(cursor ? { cursor } : {}),
+            limit: 200,
+            projection: "canonical",
+          });
+          if (timeline.type !== "fetch_agent_timeline_response" || timeline.payload.error)
+            throw new Error("Scheduled target timeline is unavailable");
+          entries.push(...timeline.payload.entries);
+          found = entries.some(
+            (entry) => entry.item.type === "user_message" && entry.item.messageId === input.run.id,
+          );
+          if (found || !timeline.payload.hasOlder || !timeline.payload.startCursor) break;
+          cursor = timeline.payload.startCursor;
+        }
+        if (!found) return undefined;
+        const prompt = entries.find(
+          (entry) => entry.item.type === "user_message" && entry.item.messageId === input.run.id,
+        );
+        if (!prompt) return undefined;
+        const nextUser = entries
+          .filter((entry) => entry.seqStart > prompt.seqEnd && entry.item.type === "user_message")
+          .sort((a, b) => a.seqStart - b.seqStart)[0];
+        const completed = entries.some(
+          (entry) =>
+            entry.seqStart > prompt.seqEnd &&
+            (!nextUser || entry.seqStart < nextUser.seqStart) &&
+            entry.item.type === "assistant_message" &&
+            (!prompt.turnId || entry.turnId === prompt.turnId),
+        );
+        if (response.payload.status === "idle" && !completed) return undefined;
+      }
+      if (!input.targetWorkspaceUid && input.archiveOnFinish !== false) {
+        try {
+          await this.archive(workspace.metadata.name, owner);
+        } catch (error) {
+          return {
+            status: "failed",
+            error: `Agent completed but workspace teardown failed; compute and storage retained: ${error instanceof Error ? error.message : "unknown error"}`,
+          };
+        }
       }
       if (response.payload.status === "idle")
         return { status: "succeeded", output: response.payload.lastMessage ?? undefined };

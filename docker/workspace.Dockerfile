@@ -47,9 +47,16 @@ RUN rm -rf /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it
 COPY --from=esbuild /patched-linkify/ /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it/
 COPY --from=esbuild /patched-uc-micro/ /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it/node_modules/uc.micro/
 COPY docker/initialize.mjs /opt/paseo/initialize.mjs
+COPY docker/checkout-failure.mjs /opt/paseo/checkout-failure.mjs
+COPY docker/checkout-budget.mjs /opt/paseo/checkout-budget.mjs
+COPY docker/inspect-refs.mjs /opt/paseo/inspect-refs.mjs
 COPY docker/git-credential.mjs /opt/paseo/git-credential.mjs
 COPY docker/teardown.mjs /opt/paseo/teardown.mjs
+COPY docker/tls-proxy.mjs /opt/paseo/tls-proxy.mjs
 COPY docker/token-file.mjs /opt/paseo/token-file.mjs
+# Remove the npm bin symlink before COPY, preserving the unmodified native launcher.
+RUN rm /usr/local/bin/codex
+COPY --chmod=755 docker/codex.mjs /usr/local/bin/codex
 COPY --chmod=755 docker/gh.mjs /usr/local/bin/gh
 COPY --chmod=755 docker/paseo-cli.mjs /opt/paseo/bin/paseo
 COPY docker/cli-target.mjs /opt/paseo/bin/cli-target.mjs

@@ -170,7 +170,7 @@ describe("cluster workspace lifecycle", () => {
     };
     const created = await service.createWorkspace(input);
     expect(created.workspace.spec).toMatchObject({
-      revision: "main",
+      revision: "refs/heads/main",
       branch: "feature/work",
       fetchDepth: 0,
     });
@@ -192,6 +192,97 @@ describe("cluster workspace lifecycle", () => {
     ).toBe(42);
   });
 
+  it("normalizes a selected remote picker ref into the exact origin head and requested branch", async () => {
+    const { service } = setup();
+    const selected = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "selected-ref",
+      source: {
+        kind: "worktree",
+        cwd: "/projects/example",
+        projectId: "example",
+        action: "branch-off",
+        refName: "refs/remotes/origin/feature/source",
+        branchName: "feature/new-work",
+      },
+    });
+    expect(selected.workspace.spec).toMatchObject({
+      revision: "refs/heads/feature/source",
+      branch: "feature/new-work",
+      fetchDepth: 0,
+    });
+    const checkout = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "checkout-ref",
+      source: {
+        kind: "worktree",
+        cwd: "/projects/example",
+        projectId: "example",
+        action: "checkout",
+        refName: "refs/remotes/origin/feature/source",
+      },
+    });
+    expect(checkout.workspace.spec).toMatchObject({
+      revision: "refs/heads/feature/source",
+      branch: "feature/source",
+    });
+    const desktop = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "desktop-ref",
+      source: {
+        kind: "worktree",
+        cwd: "/projects/example",
+        projectId: "example",
+        action: "branch-off",
+        refName: "refs/remotes/origin/feature/source",
+        worktreeSlug: "humane-zebra",
+      },
+    });
+    expect(desktop.workspace.spec).toMatchObject({
+      revision: "refs/heads/feature/source",
+      branch: "humane-zebra",
+    });
+    await expect(
+      service.createWorkspace({
+        type: "workspace.create.request",
+        requestId: "other-remote",
+        source: {
+          kind: "worktree",
+          projectId: "example",
+          refName: "refs/remotes/upstream/main",
+        },
+      }),
+    ).rejects.toThrow("configured origin");
+  });
+
+  it("uses the configured source revision for detached worktree creation without a checkout request", async () => {
+    const { service, store } = setup();
+    const configured = store.projectRows[0];
+    if (!configured) throw new Error("Test project is unavailable");
+    configured.spec.revision = "release-tag";
+    const created = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "detached-source",
+      idempotencyKey: "detached-source",
+      source: { kind: "worktree", cwd: "/projects/example", projectId: "example" },
+    });
+    expect(created.workspace.spec).toMatchObject({ revision: "release-tag", fetchDepth: 0 });
+    expect(created.workspace.spec.branch).toBeUndefined();
+  });
+
+  it("keeps legacy configured origin aliases fetchable for directory workspaces", async () => {
+    const { service, store } = setup();
+    const configured = store.projectRows[0];
+    if (!configured) throw new Error("Test project is unavailable");
+    configured.spec.revision = "origin/main";
+    const created = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "directory-origin-alias",
+      source: { kind: "directory", path: "/projects/example", projectId: "example" },
+    });
+    expect(created.workspace.spec.revision).toBe("refs/heads/main");
+  });
+
   it("waits for readiness and reports failed scheduling before attempting a provider mutation", async () => {
     const { store, service, requests } = setup();
     const row = workspace();
@@ -210,6 +301,34 @@ describe("cluster workspace lifecycle", () => {
         labels: {},
       }),
     ).rejects.toThrow("Unschedulable");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("passes a fixed checkout failure to the SDK caller without starting an agent", async () => {
+    const { store, service, requests } = setup();
+    const row = workspace();
+    row.status = {
+      phase: "Failed",
+      message:
+        "CheckoutDnsUnavailable: Repository hostname resolution failed during checkout after 3 attempts",
+      observedGeneration: 1,
+      lastFailure: {
+        reason: "CheckoutDnsUnavailable",
+        message:
+          "CheckoutDnsUnavailable: Repository hostname resolution failed during checkout after 3 attempts",
+        at: "2026-01-01T00:00:00.000Z",
+      },
+    };
+    store.workspaceRows = [row];
+    await expect(
+      service.createAgent({
+        type: "create_agent_request",
+        requestId: "checkout-failed",
+        workspaceId: "one",
+        config: { provider: "claude", cwd: "/workspaces/one" },
+        labels: {},
+      }),
+    ).rejects.toThrow("CheckoutDnsUnavailable");
     expect(requests).toHaveLength(0);
   });
 
