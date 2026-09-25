@@ -418,8 +418,8 @@ above is not a measurement of that manual run.
 The operator then created a second Claude chat in a separate workspace and
 confirmed that switching between the two showed only each conversation's own
 messages and activity. Two-workspace Desktop isolation therefore passed in this
-session. Fresh-preference, zero-Ready cold-start discovery and reconnect/history
-checks remain separate acceptance gates.
+session. Fresh-preference, zero-Ready cold-start discovery remains a separate
+acceptance gate; the reconnect/history result is recorded below.
 
 The planned 35-minute read-only memory sampler for #72 was interrupted after
 19.5 minutes when its local helper session ended. Its partial observations do
@@ -437,5 +437,13 @@ pass.
 The temporary localhost forward and TLS-verifying relay were restored as
 user-scoped macOS services independent of the desktop process. The real desktop
 Origin handshake and two fresh authenticated SDK project-list round trips then
-passed. Manual confirmation that the reconnect banner clears remains pending.
-No gateway deployment or user workspace was changed during recovery.
+passed. The operator subsequently confirmed that the desktop was connected and
+both histories were intact, completing the manual reconnect/history check after
+the helper interruption. No gateway deployment or user workspace was changed
+during that recovery. This does not qualify uninterrupted app restart with the
+new helper arrangement or a deliberately controlled gateway replacement.
+
+The independent follow-up memory sampler subsequently observed one gateway
+restart with termination reason `OOMKilled` on the same candidate. The gateway
+recovered, but #72 remains an unresolved stability issue; the successful manual
+reconnect does not qualify memory stability.
