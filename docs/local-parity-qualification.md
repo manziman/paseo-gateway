@@ -211,3 +211,27 @@ deterministic reset regressions. The full check then passed without that error.
 Manual first-prompt completion remains unobserved. Project branch/ref picker
 discovery is tracked separately in #67; the successful default creation test
 does not qualify interactive source-ref selection or forge search.
+
+## Checkout DNS failure and retained recovery
+
+A subsequent manual Desktop creation reached repository initialization but
+failed before the daemon or agent started. The generic initializer error hid
+the underlying Git failure. An isolated reproduction of the exact initializer
+against a fresh directory on the same PVC captured a DNS lookup failure. A
+separate Git fetch succeeded, and later checks of the DNS Service and both
+CoreDNS endpoints passed all 18 queries. No cluster-wide DNS settings changed;
+these observations establish an intermittent local resolution failure, not its
+underlying network cause.
+
+The failed workspace was suspended, its original checkout successfully
+initialized, and it resumed Ready with the same Workspace UID and PVC. All
+temporary diagnostic pods and the diagnostic-only directory were removed. A
+separate fresh worktree-style SDK request then cloned, created a Claude agent,
+and returned the exact requested assistant reply. That automated test workspace
+was archived and its CR/PVC removed with UID preconditions. It used the same
+gateway and workspace image digests recorded above; no retry fix was present in
+those images. The user's repaired workspace remains available.
+
+Bounded transient-fetch retries and credential-safe initialization failure
+categories are tracked in #68. Manual Desktop first-prompt completion remains
+pending; the successful prompted SDK test does not substitute for that check.
