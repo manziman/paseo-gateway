@@ -185,7 +185,14 @@ async function connectGateway() {
       const backend = new PaseoBackend(
         `ws://127.0.0.1:${ports.get(row.metadata.name)}/ws`,
         password,
-        { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
+        {
+          type: "hello",
+          clientId: randomUUID(),
+          clientType: "cli",
+          protocolVersion: 1,
+          // A Desktop-owned hello must not override the backend's selective legacy contract.
+          capabilities: { owned_subscriptions: true, selective_agent_timeline: false },
+        },
         onMessage,
         onBinary,
         onDisconnect,
@@ -269,6 +276,16 @@ try {
   });
   assert.match(created.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   const attachedText = `paseo-contract-upload-${randomUUID()}`;
+  const firstTimelineEvents: string[] = [];
+  const firstTimeline = active.subscribeAgentTimeline(created.id, (message) => {
+    if (message.type === "agent_stream")
+      firstTimelineEvents.push(
+        message.payload.event.type === "timeline"
+          ? `timeline:${message.payload.event.item.type}`
+          : message.payload.event.type,
+      );
+  });
+  await firstTimeline.ready;
   const staged = await active.uploadFile({
     fileName: "contract-attachment.txt",
     mimeType: "text/plain",
@@ -283,6 +300,16 @@ try {
     .catch(() => {
       // Provider authentication is deliberately absent; native upload precedes prompt dispatch.
     });
+  for (
+    let attempt = 0;
+    attempt < 100 && !firstTimelineEvents.includes("timeline:user_message");
+    attempt++
+  )
+    await delay(100);
+  assert.ok(
+    firstTimelineEvents.includes("timeline:user_message"),
+    "Native user timeline item must reach the subscribed SDK",
+  );
   assert.equal(
     nativeUploads.length,
     1,
@@ -303,6 +330,12 @@ try {
   });
   assert.equal(nativeCreations, 2, "Both SDK creates must use production workspace operations");
   assert.equal(secondAgent.labels["paseo.parent-agent-id"], created.id);
+  const secondTimelineEvents: string[] = [];
+  const secondTimeline = active.subscribeAgentTimeline(secondAgent.id, (message) => {
+    if (message.type === "agent_stream") secondTimelineEvents.push(message.payload.event.type);
+  });
+  await secondTimeline.ready;
+  await firstTimeline.release();
   assert.ok(operations);
   assert.deepEqual(await operations.resolveScheduleAgent(created.id, { kind: "owner" }), {
     projectId: "example",
@@ -331,6 +364,16 @@ try {
     .catch(() => {
       // Provider authentication is deliberately absent; verify native upload independently.
     });
+  for (let attempt = 0; attempt < 100 && !secondTimelineEvents.includes("timeline"); attempt++)
+    await delay(100);
+  assert.ok(
+    secondTimelineEvents.includes("timeline"),
+    "Releasing one agent must retain the other native timeline stream",
+  );
+  await secondTimeline.release();
+  console.log(
+    `PASS: native selective timeline delivery across two daemons (first=${[...new Set(firstTimelineEvents)].join(",")}; second=${[...new Set(secondTimelineEvents)].join(",")}).`,
+  );
   assert.equal(nativeUploads.length, 2);
   assert.equal(nativeUploads[1]?.workspaceId, "two");
   assert.equal(

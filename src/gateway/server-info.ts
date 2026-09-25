@@ -38,6 +38,7 @@ export function buildServerInfo(
       directorySync: true,
       workspaceMultiplicity: true,
       agentThinkingUpdate: true,
+      selectiveAgentTimeline: true,
       daemonStatusRpc: true,
       workspaceLabels,
       ...(creationLifecycle ? { creationLifecycle: true } : {}),

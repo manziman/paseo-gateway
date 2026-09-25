@@ -73,7 +73,15 @@ export class PaseoBackend implements Backend {
       clientType: "cli",
       reconnect: { enabled: false },
       connectTimeoutMs: 10000,
-      capabilities: hello.capabilities,
+      // The gateway owns the aggregate selective timeline membership for this backend
+      // connection. The SDK otherwise advertises owned_subscriptions by default,
+      // which suppresses native implicit broadcasts without a matching owner here.
+      // Legacy selective mode replaces the complete timeline set on each request.
+      capabilities: {
+        ...hello.capabilities,
+        owned_subscriptions: false,
+        selective_agent_timeline: true,
+      },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
       transportFactory: (options) => {
         const transport = factory(options);
