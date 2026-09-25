@@ -519,3 +519,16 @@ The operator confirmed that the schedule row's Last run time updated. No repeat
 dispatch was used during diagnosis. The operator then deleted the owned test
 schedule and confirmed that it disappeared from the Schedules screen, completing
 this new-agent schedule check.
+
+## Desktop existing-agent heartbeat target
+
+The operator confirmed that a future-only existing-agent heartbeat displayed its
+correct available chat target, without a `Target gone` or `Agent unavailable`
+warning. The fixture had no runs and was created without sending an agent prompt.
+This passes the manual target-association check for #64. Cadence edit and deletion
+of this owned heartbeat remain pending.
+
+This observation used the temporary memory-diagnostic gateway derived from the
+same deployed routing source as the file-link qualification above. The diagnostic
+adds bounded memory/event metadata probes; this UI observation does not qualify
+memory stability or a published image.
