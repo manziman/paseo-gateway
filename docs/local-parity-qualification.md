@@ -230,8 +230,59 @@ separate fresh worktree-style SDK request then cloned, created a Claude agent,
 and returned the exact requested assistant reply. That automated test workspace
 was archived and its CR/PVC removed with UID preconditions. It used the same
 gateway and workspace image digests recorded above; no retry fix was present in
-those images. The user's repaired workspace remains available.
+those images. The operator subsequently archived the repaired workspace; its
+retained storage was preserved.
 
 Bounded transient-fetch retries and credential-safe initialization failure
 categories are tracked in #68. Manual Desktop first-prompt completion remains
 pending; the successful prompted SDK test does not substitute for that check.
+
+## Bounded checkout retry qualification
+
+The #68 implementation retries transient Git fetch failures at most three times
+within one shared 150-second deadline. Fixed failure categories replace raw Git
+stderr in the initializer's termination message and controller status. Unit and
+socket regressions cover redaction, deadline enforcement, process-group cleanup,
+and propagation to the caller.
+
+A credential-free Docker Desktop fixture injected DNS failures into the first
+two fetch attempts, then executed real Git on the third. The workspace reached
+Ready after exactly three attempts with zero initializer restarts. Its test
+image digest was
+`sha256:a2401a35e03188aca8bd2b7fb62ebaf9ca4ec32c3658296f526cffa904f4e22b`,
+derived from retry implementation image
+`sha256:a3887687ec7072738c81cc4de92852c745e9763f58f2792f4deeb72a0e400d70`.
+Archive and teardown completed, and the owned Workspace, PVC, Project, and
+CredentialProfile were removed with UID preconditions. This test qualifies
+transient-failure recovery; it does not establish the cause of the earlier DNS
+outage or live reporting after exhausting retries.
+
+## Live Desktop timeline delivery
+
+The operator confirmed the first prompted Desktop reply arrived, then reported
+that the second reply and tool activity were missing. Read-only inspection found
+both completed turns in stored history. A separate real Claude fixture reproduced
+the failure through the pinned SDK: a tool call and final reply were stored, but
+neither arrived at the live timeline observer before fetching history.
+
+The gateway advertised the legacy broadcast timeline contract while its backend
+client opted into owned subscriptions. The #69 fix advertises selective timelines
+and uses the upstream legacy selective-subscription contract consistently at the
+backend. Socket regressions cover two workspace GUIDs and independent observer
+release; the real two-daemon contract verifies native delivery and release.
+
+After deployment, the same Kubernetes reproduction received turn activity, tool
+events, and the exact requested assistant reply through its live SDK observer
+before any history fetch. Every observed event belonged to the selected agent.
+The test workspace was archived and its CR/PVC removed with UID preconditions.
+The user's existing conversation Pod retained its UID and had zero restarts.
+
+Observed gateway digest:
+`sha256:11edafe9173d8d00d929f921886e5e874b8c733fefaa9e4317596ae6f56d989e`.
+Observed new workspace digest:
+`sha256:cba69c0dfe4e5eb4f1b0ddf3275a6a0b7aaeb54582518770c981fe3356a75996`.
+The integrated local check passed 310 unit/socket tests (two skipped), typecheck,
+lint, build, 37 release tests, 14 qualification tests, and 14 PR-title tests.
+Manual observation of Desktop's live tool widgets after reconnecting remains
+pending; the SDK test does not assert desktop rendering or guarantee a provider
+will emit reasoning events for every turn.
