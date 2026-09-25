@@ -1,5 +1,21 @@
 # Local parity qualification (partial)
 
+This document is a chronological evidence log, not a claim that every historical
+candidate passed. Later sections supersede earlier pending observations only for
+the explicitly repeated checks and recorded images. Current pre-EKS status:
+
+| Area | Latest local status |
+| --- | --- |
+| Claude/Codex/OpenCode prompts and idle/active gateway recovery | Passed on the recorded development candidates; exact release artifacts remain separate |
+| GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
+| Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
+| Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
+| Fresh-preference zero-Ready Desktop/ref picker | Pending final-candidate operator check (#65/#67) |
+| Stopped uncached transcript | Subscription correction passed; retained PVC history implementation/acceptance tracked in #76 |
+| Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
+| Gateway memory | Targeted reproduction/mitigation and 80-minute process-age observation passed, with a recorded host-sleep sampling gap |
+| EKS CSI, network enforcement, node-loss fencing and exact cloud candidate | Pending isolated operator-led validation (#61) |
+
 Observation date: 2026-09-24. Source branch: `feat/full-parity`; candidate images
 were built from the working tree based on commit `b351722`, before candidate
 commits. These are local fixture
@@ -736,3 +752,57 @@ this is not an uninterrupted 80-minute soak. It exceeds the previously observed
 establishing arbitrary-load or EKS stability. The release's exact ARM64 gateway
 artifact must also pass the bounded validator regression before signing;
 representative EKS load and failure observation remain part of #61.
+
+
+## Catalog scope, invalidation and missing-reference recovery
+
+On 2026-09-25, five additional SDK/Kubernetes checks passed against gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+Three newly created project/profile scopes used the existing authorized Claude
+credential reference and workspace image `paseo-workspace:parity-final5`.
+Two scopes discovered catalogs independently, with distinct durable fingerprints
+and matching requested `cwd`. Their runtime/provider configurations were equivalent
+apart from a harmless ConfigMap-backed environment value; this establishes scope
+and fingerprint separation, not different model contents.
+
+Changing only one fixture ConfigMap's resource version caused that catalog to
+be rediscovered while the other fingerprint remained unchanged. A third profile's
+missing ConfigMap produced no verified-ready result; creating that reference
+allowed subsequent discovery to complete. No user workspace or agent was created,
+and no model prompt was sent. Completed probes were checked before UID-fenced
+cleanup of the owned project/profile/configuration and catalog records.
+
+The first fixture attempt correctly hit the reserved runtime-environment-name
+admission rule; the harmless test variable was changed to a non-reserved name
+before these checks ran. These automated results complement the earlier native
+probe and interrupted-discovery recovery evidence. They do not replace the
+fresh-preference, zero-Ready Desktop check or prove EKS network enforcement.
+
+
+## Secured checkout receipt across Kubernetes restarts
+
+On 2026-09-25, the init-only receipt qualification passed on the normal gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+It used tiny fixture derivatives of workspace base
+`sha256:f7e76745f971ef599a959e504c7af55601bb68cac11f372a58a8d41b7686cd63`,
+with the current product initializer/receipt code and an instrumented Git wrapper.
+The wrapper injected failures and recorded only receipt counters/permissions.
+These are fault-injection derivatives, not unmodified release-image qualification.
+
+| Check | Observed result |
+| --- | --- |
+| DNS failure across init restarts | Exactly three fetches, two init restarts, one Pod-wide start/deadline receipt; `CheckoutDnsUnavailable`, attempts 3 |
+| Permanent authentication failure | Exactly one fetch across two init restarts; `CheckoutAuthenticationFailed`, attempts 1; daemon never started |
+| Clean recovery | New Pod/fresh budget, same PVC, successful checkout and retained sentinel |
+| Subsequent completed-checkout restart | Dirty file preserved; no additional Git fetch |
+| Receipt isolation | Dedicated 1 MiB init-only volume and private ownership/mode; daemon could not read receipt |
+
+Clean/DNS/authentication fixture image digests were respectively
+`sha256:10f92d9268f8e6a7744094f16160519e17e81df85c45c5ac7569ded9f82f32e7`,
+`sha256:a925f0493178e21cd2e22289487df0ab61316369502ca4217676937a155c1a0b`,
+and `sha256:e1f2df8e40de7be687057911a9f8bb511608a4629b6eeb91fdb5c9224343c2c2`.
+No provider prompt was dispatched. Cleanup of the permanently failing fixture
+first required removing its artificial fault image and replacing only its owned
+Pod so normal teardown could run. Both fixtures then completed controller
+teardown and their exact UID-recorded workspaces, PVCs, projects and profiles
+were observed deleted; no archive or finalizer safety check was bypassed.
