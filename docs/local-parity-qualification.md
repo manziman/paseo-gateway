@@ -165,8 +165,9 @@ Observed gateway digest:
 The probe used the previously recorded workspace image
 `sha256:a23986a8fa639a50f58aa170951e99d01c16b5993ad81d05d18dec39abfb1edb`.
 The pinned Desktop source proof verifies project-cwd cache routing and model
-selection from a ready snapshot. Actual Desktop model selection and completion
-of the first prompted Chat remain pending the operator's observation.
+selection from a ready snapshot. The operator subsequently confirmed that models
+load in Desktop. Submission then exposed the separate project checkout-status
+routing gap tracked in #66; completion of the first prompted Chat remains pending.
 
 The tested gateway image predates the subsequent same-fingerprint, known-provider
 error-row enhancement, which has unit coverage. Cross-profile live isolation and
@@ -174,3 +175,39 @@ initial-discovery failure UI qualification remain open. See
 [provider discovery](provider-discovery.md) for the bounded cleanup behavior and
 the pinned Desktop's limitation when a failed first probe has no known provider
 identity.
+
+## Project checkout inspection before Desktop creation
+
+After model discovery worked, Desktop submission failed with
+`requestType=checkout_status_request code=gateway_operation_failed`: the virtual
+project path was still routed through a workspace-only handler. The pinned SDK
+reproduced that exact failure. Project inspection now returns the real disposable
+source checkout's status under the authorized logical project path, fenced by
+the same UID/configuration fingerprint as discovery. This is a cached source
+revision snapshot, not a persistent shared checkout.
+
+On 2026-09-24, the same local SDK request passed after upgrade, including migration
+from a provider-only catalog record. The native source checkout reported a
+detached Git revision and a remote. A Desktop-style worktree creation request
+without an explicit selected ref then created a Ready workspace and an initial
+Claude agent with a GUID. Checkout inspection of that workspace also passed.
+No model prompt was submitted by this automated test. Archive completed, and the
+test workspace and its retained PVC were removed using exact UID preconditions.
+
+Observed gateway digest:
+`sha256:fd26ba3d9579afd0a9bc7a9c3cbf8a96aa3e8d99488da44c6c4387ba3e91059d`.
+The workspace used the previously recorded
+`sha256:a23986a8fa639a50f58aa170951e99d01c16b5993ad81d05d18dec39abfb1edb` image.
+The integrated check passed 277 unit/socket tests plus lint, typecheck, build,
+release, title, and qualification checks. A real daemon contract verifies native
+Git status and path mapping; unit tests cover cache migration, authorization
+races, valid SSH URLs, and the end-to-end checkout request deadline.
+
+The integrated run also reproduced an uncaught connection reset during rejected
+WebSocket authentication. The gateway now owns raw upgrade-socket errors until
+the WebSocket handler takes over; denied, pending, and failed authentication have
+deterministic reset regressions. The full check then passed without that error.
+
+Manual first-prompt completion remains unobserved. Project branch/ref picker
+discovery is tracked separately in #67; the successful default creation test
+does not qualify interactive source-ref selection or forge search.
