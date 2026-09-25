@@ -78,6 +78,16 @@ This does not extend mutation deadlines or enable replay.
 Workspace pod replacement can interrupt
 an active turn even though files and provider history survive.
 
+The checkout init container retries only recognized transient Git DNS, network,
+and timeout failures, at most three fetch attempts within a 150-second budget.
+It keeps the same workspace volume and writes the ready marker only after a
+successful checkout. Authentication, missing revision, local storage, and
+unclassified failures stop promptly. The controller accepts only fixed
+termination reason codes such as `CheckoutDnsUnavailable` and publishes a
+credential-safe status message; unknown or malformed container text remains
+`ContainerFailed`. These codes identify the observed fetch failure, not the
+underlying DNS service cause. A persistent DNS outage still prevents checkout.
+
 One pod and a ReadWriteOnce PVC are sufficient for the local single-node POC,
 but are not fencing under node partitions. Never force-delete a pod on an
 unreachable node while its volume may still have a writer. Fence the node or

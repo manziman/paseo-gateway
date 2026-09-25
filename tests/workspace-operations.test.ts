@@ -228,6 +228,34 @@ describe("cluster workspace lifecycle", () => {
     expect(requests).toHaveLength(0);
   });
 
+  it("passes a fixed checkout failure to the SDK caller without starting an agent", async () => {
+    const { store, service, requests } = setup();
+    const row = workspace();
+    row.status = {
+      phase: "Failed",
+      message:
+        "CheckoutDnsUnavailable: Repository hostname resolution failed during checkout after 3 attempts",
+      observedGeneration: 1,
+      lastFailure: {
+        reason: "CheckoutDnsUnavailable",
+        message:
+          "CheckoutDnsUnavailable: Repository hostname resolution failed during checkout after 3 attempts",
+        at: "2026-01-01T00:00:00.000Z",
+      },
+    };
+    store.workspaceRows = [row];
+    await expect(
+      service.createAgent({
+        type: "create_agent_request",
+        requestId: "checkout-failed",
+        workspaceId: "one",
+        config: { provider: "claude", cwd: "/workspaces/one" },
+        labels: {},
+      }),
+    ).rejects.toThrow("CheckoutDnsUnavailable");
+    expect(requests).toHaveLength(0);
+  });
+
   it("never repeats a keyed mutation after an ambiguous response, including a new service instance", async () => {
     const { store, service, requests } = setup(true);
     store.workspaceRows = [workspace()];

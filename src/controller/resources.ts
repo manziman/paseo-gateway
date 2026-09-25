@@ -151,6 +151,8 @@ export function desiredResources(
           image,
           imagePullPolicy: config.imagePullPolicy,
           command: ["node", "/opt/paseo/initialize.mjs"],
+          terminationMessagePath: "/dev/termination-log",
+          terminationMessagePolicy: "File",
           env: [
             ...credentials.env,
             { name: "HOME", value: "/data/home" },

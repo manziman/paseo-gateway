@@ -2,14 +2,30 @@ import { spawnSync } from "node:child_process";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  CheckoutFailure,
+  classifyGitFailure,
+  FETCH_DEADLINE_MS,
+  fetchWithRetry,
+  MAX_FETCH_ATTEMPTS,
+  runFetchCommand,
+  terminationMessage,
+} from "./checkout-failure.mjs";
 
-function git(args, cwd) {
+function git(args, cwd, stage = "checkout") {
   const result = spawnSync("git", args, {
     cwd,
     stdio: "pipe",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
   });
-  if (result.status !== 0) throw new Error("Repository initialization failed");
+  if (result.status !== 0) throw classifyGitFailure(result, stage);
+}
+
+async function fetch(args, cwd, deadline, attemptOffset = 0) {
+  await fetchWithRetry((remaining) => runFetchCommand(args, cwd, remaining), {
+    deadline,
+    attemptOffset,
+  });
 }
 
 async function attachReferenceCache(referencePath, workspace) {
@@ -56,7 +72,7 @@ async function attachReferenceCache(referencePath, workspace) {
   return true;
 }
 
-export async function initialize(dataRoot = "/data", referencePath = "/reference/git") {
+async function initializeInternal(dataRoot, referencePath) {
   await mkdir(`${dataRoot}/home/.paseo`, { recursive: true });
   await mkdir(`${dataRoot}/home/.claude`, { recursive: true });
   await mkdir(`${dataRoot}/workspace`, { recursive: true });
@@ -82,24 +98,26 @@ export async function initialize(dataRoot = "/data", referencePath = "/reference
           (url.protocol === "ssh:" && url.username === "git" && !url.password));
     }
     if (!validRepository || /\s/.test(repository))
-      throw new Error("Invalid repository transport or embedded credentials");
+      throw new CheckoutFailure("prepare", "CheckoutConfigurationInvalid");
     // init/fetch is safe to repeat after interrupted cloning and does not erase an existing working tree.
-    git(["init", `${dataRoot}/workspace`]);
+    git(["init", `${dataRoot}/workspace`], undefined, "prepare");
     const remote = spawnSync("git", ["config", "--get", "remote.origin.url"], {
       cwd: `${dataRoot}/workspace`,
       encoding: "utf8",
     });
-    if (remote.status !== 0) git(["remote", "add", "origin", repository], `${dataRoot}/workspace`);
+    if (remote.status !== 0)
+      git(["remote", "add", "origin", repository], `${dataRoot}/workspace`, "prepare");
     else if (remote.stdout.trim() !== repository)
-      throw new Error("Existing repository origin does not match the project");
+      throw new CheckoutFailure("prepare", "CheckoutConfigurationInvalid");
     const depth = process.env.FETCH_DEPTH ?? "1";
     if (!/^(0|[1-9][0-9]{0,5})$/.test(depth) || Number(depth) > 100000)
-      throw new Error("Invalid fetch depth");
+      throw new CheckoutFailure("prepare", "CheckoutConfigurationInvalid");
     const pullRequest = process.env.PULL_REQUEST;
     if (pullRequest && !/^[1-9][0-9]*$/.test(pullRequest))
-      throw new Error("Invalid pull request number");
+      throw new CheckoutFailure("prepare", "CheckoutConfigurationInvalid");
     const revision = pullRequest ? `refs/pull/${pullRequest}/head` : process.env.REVISION || "HEAD";
-    if (!/^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]*$/.test(revision)) throw new Error("Invalid revision");
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/@{}^~+-]*$/.test(revision))
+      throw new CheckoutFailure("prepare", "CheckoutConfigurationInvalid");
     const usingCache = await attachReferenceCache(referencePath, `${dataRoot}/workspace`);
     const fetchArgs = [
       "fetch",
@@ -109,12 +127,19 @@ export async function initialize(dataRoot = "/data", referencePath = "/reference
       "origin",
       revision,
     ];
+    const deadline = Date.now() + FETCH_DEADLINE_MS;
     try {
-      git(fetchArgs, `${dataRoot}/workspace`);
+      await fetch(fetchArgs, `${dataRoot}/workspace`, deadline);
     } catch (error) {
-      if (!usingCache) throw error;
+      if (
+        !usingCache ||
+        !(error instanceof CheckoutFailure) ||
+        error.code !== "CheckoutCacheInvalid" ||
+        error.attempts >= MAX_FETCH_ATTEMPTS
+      )
+        throw error;
       await rm(`${dataRoot}/workspace/.git/objects/info/alternates`, { force: true });
-      git(fetchArgs, `${dataRoot}/workspace`);
+      await fetch(fetchArgs, `${dataRoot}/workspace`, deadline, error.attempts);
     }
     git(["checkout", "--detach", "FETCH_HEAD"], `${dataRoot}/workspace`);
     if (process.env.BRANCH) {
@@ -151,4 +176,25 @@ export async function initialize(dataRoot = "/data", referencePath = "/reference
 
   await rename(`${dataRoot}/home/.paseo/config.json.tmp`, `${dataRoot}/home/.paseo/config.json`);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await initialize();
+
+export async function initialize(dataRoot = "/data", referencePath = "/reference/git") {
+  try {
+    await initializeInternal(dataRoot, referencePath);
+  } catch (error) {
+    if (error instanceof CheckoutFailure) throw error;
+    const code = ["ENOSPC", "EROFS", "EACCES", "EPERM"].includes(error?.code)
+      ? "CheckoutLocalStorageFailed"
+      : "CheckoutInitializationFailed";
+    throw new CheckoutFailure("prepare", code);
+  }
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await initialize();
+  } catch (error) {
+    const diagnostic = terminationMessage(error);
+    await writeFile("/dev/termination-log", diagnostic, { mode: 0o600 }).catch(() => {});
+    console.error(diagnostic);
+    process.exitCode = 1;
+  }
+}

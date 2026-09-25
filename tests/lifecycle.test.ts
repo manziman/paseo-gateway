@@ -2,7 +2,7 @@ import type { V1Pod } from "@kubernetes/client-node";
 import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAdmission } from "../src/controller/admission.js";
 import { WorkspaceController } from "../src/controller/controller.js";
-import { podDiagnostic } from "../src/controller/diagnostics.js";
+import { checkoutTerminationDiagnostic, podDiagnostic } from "../src/controller/diagnostics.js";
 import { resourceName } from "../src/controller/resources.js";
 import { MemoryStore, workspace } from "./fixtures.js";
 
@@ -89,6 +89,85 @@ describe("retention and lifecycle failure safety", () => {
     });
     expect(result?.reason).toBe("OOMKilled");
     expect(JSON.stringify(result)).not.toContain("TOKEN");
+  });
+  it("accepts only fixed checkout termination codes and carries them into workspace status", async () => {
+    const { store, row, controller } = await fixture();
+    const pod = store.objects.get(`Pod/${resourceName(row)}`);
+    if (pod?.kind !== "Pod") throw new Error("Missing checkout Pod");
+    const safe = JSON.stringify({
+      version: 1,
+      stage: "fetch",
+      code: "CheckoutDnsUnavailable",
+      attempts: 3,
+    });
+    pod.status = {
+      phase: "Pending",
+      initContainerStatuses: [
+        {
+          name: "checkout",
+          ready: false,
+          restartCount: 1,
+          image: "test",
+          imageID: "test",
+          state: { terminated: { exitCode: 1, reason: "Error", message: safe } },
+        },
+      ],
+    };
+    await controller.reconcile(row, store.projectRows);
+    expect(row.status?.phase).toBe("Failed");
+    expect(row.status?.lastFailure?.reason).toBe("CheckoutDnsUnavailable");
+    expect(row.status?.message).toContain("after 3 attempts");
+    expect(JSON.stringify(row.status)).not.toContain("private");
+  });
+  it("rejects unsafe or forged termination messages and uses a generic fallback", () => {
+    const safe = JSON.stringify({
+      version: 1,
+      stage: "fetch",
+      code: "CheckoutAuthenticationFailed",
+      attempts: 1,
+    });
+    expect(checkoutTerminationDiagnostic(safe)?.reason).toBe("CheckoutAuthenticationFailed");
+    for (const message of [
+      `${safe}TOKEN=secret`,
+      JSON.stringify({ ...JSON.parse(safe), raw: "TOKEN=secret" }),
+      JSON.stringify({ ...JSON.parse(safe), code: "TOKEN=secret" }),
+      JSON.stringify({ ...JSON.parse(safe), attempts: 99 }),
+      JSON.stringify({ ...JSON.parse(safe), stage: ["fetch"] }),
+    ]) {
+      expect(checkoutTerminationDiagnostic(message)).toBeUndefined();
+      const diagnostic = podDiagnostic({
+        status: {
+          initContainerStatuses: [
+            {
+              name: "checkout",
+              ready: false,
+              restartCount: 1,
+              image: "test",
+              imageID: "test",
+              state: { terminated: { exitCode: 1, reason: "Error", message } },
+            },
+          ],
+        },
+      });
+      expect(diagnostic?.reason).toBe("ContainerFailed");
+      expect(JSON.stringify(diagnostic)).not.toContain("secret");
+    }
+    expect(
+      podDiagnostic({
+        status: {
+          initContainerStatuses: [
+            {
+              name: "checkout",
+              ready: false,
+              restartCount: 1,
+              image: "test",
+              imageID: "test",
+              state: { terminated: { exitCode: 137, reason: "OOMKilled", message: safe } },
+            },
+          ],
+        },
+      })?.reason,
+    ).toBe("OOMKilled");
   });
   it("atomically refuses concurrent over-cap API creates", async () => {
     const store = new MemoryStore();

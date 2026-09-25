@@ -47,6 +47,7 @@ RUN rm -rf /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it
 COPY --from=esbuild /patched-linkify/ /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it/
 COPY --from=esbuild /patched-uc-micro/ /usr/local/lib/node_modules/@getpaseo/server/node_modules/linkify-it/node_modules/uc.micro/
 COPY docker/initialize.mjs /opt/paseo/initialize.mjs
+COPY docker/checkout-failure.mjs /opt/paseo/checkout-failure.mjs
 COPY docker/git-credential.mjs /opt/paseo/git-credential.mjs
 COPY docker/teardown.mjs /opt/paseo/teardown.mjs
 COPY docker/tls-proxy.mjs /opt/paseo/tls-proxy.mjs

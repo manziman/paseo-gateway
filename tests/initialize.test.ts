@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -52,7 +52,7 @@ function setup() {
       },
     });
   }
-  return { data, source, initialize, git, first };
+  return { root, data, source, initialize, git, first };
 }
 describe("workspace checkout initialization", () => {
   it("creates a branch with bounded history and preserves dirty work on restart", () => {
@@ -78,7 +78,11 @@ describe("workspace checkout initialization", () => {
   it("retries an interrupted checkout without replacing its origin", () => {
     const fixture = setup();
     expect(fixture.initialize({ REVISION: "missing" }).status).not.toBe(0);
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
+    expect(existsSync(join(fixture.data, "workspace/.git"))).toBe(true);
     expect(fixture.initialize().status).toBe(0);
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(true);
+    expect(readFileSync(join(fixture.data, "workspace/file.txt"), "utf8")).toBe("second\n");
   });
   it("dissociates borrowed cache objects so deleting the cache cannot damage a workspace", () => {
     const fixture = setup();
@@ -101,11 +105,41 @@ describe("workspace checkout initialization", () => {
       fixture.git(["rev-parse", "HEAD"], fixture.source),
     );
   });
+  it("detaches a vanished reference cache and completes a bounded cold fetch", () => {
+    const fixture = setup();
+    const cache = `${fixture.source}-cache`;
+    fixture.git(["clone", "--mirror", fixture.source, cache]);
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    const marker = join(fixture.root, "dropped-cache");
+    const count = join(fixture.root, "fetch-count");
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nif [ "$1" = "fetch" ]; then\n  printf "x\\n" >> "$FETCH_COUNT"\n  if [ ! -e "$FETCH_MARKER" ]; then\n    : > "$FETCH_MARKER"\n    rm -rf "$CACHE_OBJECTS"\n    echo "error: object directory /missing does not exist; check .git/objects/info/alternates" >&2\n    exit 128\n  fi\nfi\nexec "$REAL_GIT" "$@"\n',
+      { mode: 0o755 },
+    );
+    const result = fixture.initialize(
+      {
+        PATH: `${bin}:${process.env.PATH}`,
+        REAL_GIT: realGit,
+        CACHE_OBJECTS: join(cache, "objects"),
+        FETCH_MARKER: marker,
+        FETCH_COUNT: count,
+      },
+      cache,
+    );
+    expect(result.status).toBe(0);
+    expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(2);
+    expect(existsSync(join(fixture.data, "workspace/.git/objects/info/alternates"))).toBe(false);
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(true);
+  });
   it("rejects unsafe fetch arguments without leaking command output", () => {
     const fixture = setup();
     const result = fixture.initialize({ REVISION: "--upload-pack=bad" });
     expect(result.status).not.toBe(0);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("Invalid revision");
+    expect(result.stderr).toContain("CheckoutConfigurationInvalid");
+    expect(result.stderr).not.toContain("--upload-pack=bad");
   });
 });
