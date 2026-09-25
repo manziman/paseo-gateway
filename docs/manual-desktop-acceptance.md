@@ -15,6 +15,53 @@ For the prepared local session, keep the operator's port-forward and loopback re
 
 The relay accepts connections only on localhost and verifies TLS to the gateway. This path tests the desktop protocol and authentication, **not** desktop certificate validation. A direct TLS test instead uses the gateway's forwarded TLS port, **Use SSL** on, and a certificate trusted by the desktop; do not disable certificate checks. Run the forward and relay independently of the desktop process before testing app quit/reopen; helper sessions owned by the app under test may terminate with it. If the local connection stops, ask the operator to restore the forward and relay before retrying. Select the newly added host rather than the app's built-in local daemon.
 
+## Fresh Desktop preferences on macOS
+
+For the cold-start case, use upstream's `PASEO_ELECTRON_USER_DATA_DIR` hook with a
+new directory instead of resetting existing Desktop preferences. Give the QA
+instance a separate `PASEO_HOME` and disable built-in daemon management before
+launch. The [upstream packaged-app smoke test](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/e2e/packaged-app-smoke.js#L132)
+uses these isolation hooks; [Desktop applies the user-data override](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/src/main.ts#L299)
+before its single-instance lock. The installed 0.9.2 bundle was also checked for
+these branches. This recipe is source-verified; its actual fresh-client launch
+and cold-project flow still require acceptance.
+
+```sh
+umask 077
+paseo_qa_dir="$(mktemp -d /tmp/paseo-desktop-fresh.XXXXXX)"
+mkdir "$paseo_qa_dir/user-data" "$paseo_qa_dir/daemon"
+cat > "$paseo_qa_dir/user-data/desktop-settings.json" <<'JSON'
+{
+  "version": 1,
+  "settings": {
+    "releaseChannel": "stable",
+    "notifications": { "playSound": true },
+    "daemon": { "manageBuiltInDaemon": false, "keepRunningAfterQuit": false }
+  },
+  "migrations": {
+    "legacyRendererSettingsImported": true,
+    "daemonStopOnQuitDefaultApplied": true
+  }
+}
+JSON
+PASEO_ELECTRON_USER_DATA_DIR="$paseo_qa_dir/user-data" \
+PASEO_HOME="$paseo_qa_dir/daemon" \
+PASEO_TEST_APP_NAME="Paseo Fresh QA" \
+  /Applications/Paseo.app/Contents/MacOS/Paseo
+```
+
+Use the separately named QA window and add only the prepared gateway through
+**Add host → Direct connection**. Keep built-in daemon management disabled, leave
+the original app running, and do not copy its storage into the QA profile. Quit
+only the QA instance after testing. Retain its temporary directory for evidence
+until cleanup. This isolates preferences and daemon home, not all filesystem
+writes: the app can create its ordinary macOS log directory under
+`~/Library/Logs/Paseo Fresh QA`.
+
+Fresh client preferences alone do not make the server catalog cold. Coordinate
+zero Ready workspaces and a new or intentionally invalidated fixture catalog
+scope with the operator before performing the first prompted Chat check.
+
 ## Run and record
 
 On 2026-09-25, the operator confirmed that the corrected fresh Claude chat flow
