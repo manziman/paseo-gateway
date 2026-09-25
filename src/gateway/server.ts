@@ -101,9 +101,18 @@ export async function startGateway(options: ServerOptions) {
       [...protocols].find((p) => p.startsWith("paseo.bearer.")) ?? false,
   });
   server.on("upgrade", (request, socket, head) => {
+    // HTTP stops owning upgraded sockets before asynchronous authentication.
+    // A denied or disconnected peer can reset here before ws installs handlers.
+    const onSocketError = () => socket.destroy();
+    socket.on("error", onSocketError);
+    socket.once("close", () => socket.off("error", onSocketError));
+    const rejectUpgrade = (status: string) => {
+      if (!socket.destroyed && !socket.writableEnded)
+        socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+    };
     void (async () => {
       if (request.url !== "/ws" || !allowedRequest(request, options.allowedHosts)) {
-        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        rejectUpgrade("401 Unauthorized");
         return;
       }
       const principal = await authenticateRequest(
@@ -112,15 +121,18 @@ export async function startGateway(options: ServerOptions) {
         options.store,
         options.scopedAuth,
       );
+      if (socket.destroyed || socket.writableEnded) return;
       if (!principal) {
-        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        rejectUpgrade("401 Unauthorized");
         return;
       }
       wss.handleUpgrade(request, socket, head, (ws) => {
+        // ws has now installed its own socket error handler.
+        socket.off("error", onSocketError);
         principals.set(ws, principal);
         wss.emit("connection", ws);
       });
-    })().catch(() => socket.end("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"));
+    })().catch(() => rejectUpgrade("503 Service Unavailable"));
   });
   wss.on("connection", (ws: WebSocket) => {
     const principal = principals.get(ws);
