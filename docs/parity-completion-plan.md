@@ -12,6 +12,7 @@ not turn an experimental release into a full-parity support claim.
 | [#57](https://github.com/manziman/paseo-gateway/issues/57) | Authenticated Claude/Codex/OpenCode and GitHub App renewal, expiry and recovery | Operator credentials; #56 for subscription case |
 | [#58](https://github.com/manziman/paseo-gateway/issues/58) | Existing-agent schedules, authorized durable target binding, no replay | Existing scheduler/workspace operations |
 | [#59](https://github.com/manziman/paseo-gateway/issues/59) | Bounded retained suspended inventory and durable workspace labels | UID-fenced records; controller snapshot hook |
+| [#77](https://github.com/manziman/paseo-gateway/issues/77) | Preserve received permission replies across immediate CLI disconnect | Bounded authorized drain; real two-workspace approval/denial replay |
 | [#76](https://github.com/manziman/paseo-gateway/issues/76) | Readable stopped-workspace timeline snapshots on retained PVCs | #59 metadata; bounded credential-free reader; old-volume migration |
 | [#60](https://github.com/manziman/paseo-gateway/issues/60) | Safe attachment and HTTP download routing | Explicit supported routing context; unchanged client contract |
 | [#61](https://github.com/manziman/paseo-gateway/issues/61) | EKS storage, encrypted transport, enforced policies/private egress and dedicated node-failure fixture | Qualified candidate, local/provider checks first; operator deployment last |

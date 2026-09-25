@@ -10,6 +10,7 @@ the explicitly repeated checks and recorded images. Current pre-EKS status:
 | GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
 | Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
 | Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
+| Scoped CLI permission resolution | Real aggregate listing passed; denial exposed a disconnect race tracked in #77 |
 | Fresh-preference zero-Ready Desktop/ref picker | Pending final-candidate operator check (#65/#67) |
 | Stopped uncached transcript | Subscription correction passed; retained PVC history implementation/acceptance tracked in #76 |
 | Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
@@ -806,3 +807,55 @@ first required removing its artificial fault image and replacing only its owned
 Pod so normal teardown could run. Both fixtures then completed controller
 teardown and their exact UID-recorded workspaces, PVCs, projects and profiles
 were observed deleted; no archive or finalizer safety check was bypassed.
+
+
+## Capacity admission and failed teardown rehearsal
+
+On 2026-09-25, isolated public-repository fixtures on Docker Desktop verified
+project capacity and scheduler diagnostics against the normal gateway candidate.
+A project cap of one admitted exactly one of two concurrent SDK creation calls.
+A separately submitted over-cap Workspace stayed Pending with a capacity message
+and no Pod, while the admitted worker stayed Ready. A second fixture requested
+an impossible CPU allocation; its Pending status exposed
+`lastFailure.reason=Unschedulable`. The final harness run exited successfully and
+independent UID checks found none of its 17 recorded resources remaining.
+
+Two earlier harness cleanup attempts needed correction: first they used the
+normal Ready-workspace path for an unschedulable Pod, then deletion while desired
+residency was Running allowed controller recreation. UID guards refused the
+changed Pod. The final cleanup first changed desired residency to Suspended,
+then removed the exact owned Pod and waited for absence. These fixture mistakes
+were not represented as product failures or successful clean runs.
+
+A separate retained fixture used a harmless teardown hook that incremented a
+counter and exited nonzero. Its archive request entered Failed without a
+`teardownCompletedAt` timestamp. Exact Pod/PVC UIDs and a sentinel remained;
+a durable teardown intent existed, no completion marker existed, and a six-second
+recheck showed the counter was still one. This proves retained failure state and
+no immediate automatic hook replay, not successful archival. The disposable
+fixture was then explicitly removed with UID checks: all seven recorded resources
+were absent, and no protective finalizer was removed. Both original user Pod UIDs
+remained unchanged throughout these rehearsals.
+
+These checks do not establish live API-outage handling, OOM/eviction recovery or
+node-partition fencing. Those remain separately graded failure scenarios.
+
+## Real permission prompt regression
+
+Two actual Claude agents in separate owned workspaces requested permission for
+harmless fixture-file writes. The scoped in-pod CLI aggregated both through
+`permit ls --json`. Its `permit deny <agent> --all --json` call returned, but the
+original selected prompt remained pending through the bounded deadline. The
+second workspace stayed pending. Approval and file-isolation completion were
+not claimed for this failed run.
+
+This occurred on gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`
+and workspace
+`sha256:cba69c0dfe4e5eb4f1b0ddf3275a6a0b7aaeb54582518770c981fe3356a75996`.
+An offline socket regression subsequently reproduced a received permission reply
+being dropped when an immediate client close raced asynchronous authorization.
+The correction and final live replay are tracked in #77. Both live fixtures were
+removed after normal controller teardown and observed Pod absence, using exact
+UIDs; cleanup required reconnecting after the first workspace archive closed the
+harness session.
