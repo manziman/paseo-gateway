@@ -443,10 +443,13 @@ the helper interruption. No gateway deployment or user workspace was changed
 during that recovery. This does not qualify uninterrupted app restart with the
 new helper arrangement or a deliberately controlled gateway replacement.
 
-The independent follow-up memory sampler subsequently observed one gateway
-restart with termination reason `OOMKilled` on the same candidate. The gateway
+The independent follow-up memory sampler completed 35 minutes with 70 samples
+and observed one gateway restart with termination reason `OOMKilled` on the same
+candidate. The process terminated at 15:31:11 UTC on 2026-09-25, between samples
+at 15:31:00 and 15:31:30. Workspace phase counts remained unchanged. The gateway
 recovered, but #72 remains an unresolved stability issue; the successful manual
-reconnect does not qualify memory stability.
+reconnect does not qualify memory stability. The post-restart cgroup peak does
+not bound the memory spike in the terminated container.
 
 ## Desktop terminal isolation
 
@@ -462,3 +465,16 @@ control and asked the agent to read it. The returned contents matched the test
 marker. This qualifies manual attachment upload and agent access in the selected
 workspace. Opening or downloading an agent-generated file remains a separate
 acceptance gate.
+
+## Desktop generated file links
+
+The operator's generated-file check failed with `No file found` for the test
+filename. Read-only checks confirmed that the file existed in the selected
+workspace with the expected contents, and the gateway's direct file read
+returned those bytes. The same file was absent from the other test workspace.
+
+Replaying Desktop's workspace-scoped suffix lookup reproduced the failure:
+`directory_suggestions_request` with a workspace `cwd` was rejected as
+unsupported. Cwd-less project discovery has a separate existing handler. The
+generated file-link acceptance gate remains failed pending the routing fix and
+manual recheck tracked in #73; attachment upload success does not cover it.
