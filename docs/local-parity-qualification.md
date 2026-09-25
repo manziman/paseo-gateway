@@ -512,4 +512,6 @@ produced exactly one successful run in about 17 seconds, with stored output
 matching the requested marker. Its configured `archiveOnFinish: true` caused
 the completed agent to be archived, explaining its absence from active chats.
 The operator confirmed that the schedule row's Last run time updated. No repeat
-dispatch was used during diagnosis. Schedule deletion remains to be checked.
+dispatch was used during diagnosis. The operator then deleted the owned test
+schedule and confirmed that it disappeared from the Schedules screen, completing
+this new-agent schedule check.
