@@ -507,6 +507,9 @@ gateway change. This records successful creation, not a fix for the intermittent
 empty picker; the latter remains an unqualified observation under #65.
 
 The operator confirmed that editing the daily time, saving, pausing, and
-resuming all worked and displayed the correct state. A subsequent manual
-Run now attempt did not show the expected result and is under investigation;
-schedule dispatch and agent completion are not yet counted as manual passes.
+resuming all worked and displayed the correct state. The manual Run now attempt
+produced exactly one successful run in about 17 seconds, with stored output
+matching the requested marker. Its configured `archiveOnFinish: true` caused
+the completed agent to be archived, explaining its absence from active chats.
+The operator confirmed that the schedule row's Last run time updated. No repeat
+dispatch was used during diagnosis. Schedule deletion remains to be checked.
