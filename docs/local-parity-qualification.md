@@ -447,3 +447,11 @@ The independent follow-up memory sampler subsequently observed one gateway
 restart with termination reason `OOMKilled` on the same candidate. The gateway
 recovered, but #72 remains an unresolved stability issue; the successful manual
 reconnect does not qualify memory stability.
+
+## Desktop terminal isolation
+
+On 2026-09-25, the operator opened a terminal in each of the two test workspaces,
+printed a distinct harmless marker in each, and confirmed that both terminals
+worked and their output stayed separate when switching between them. This
+qualifies the manual terminal routing/isolation check. Desktop attachment and
+download controls remain separate acceptance gates.
