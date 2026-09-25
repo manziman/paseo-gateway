@@ -688,3 +688,38 @@ No traced JavaScript Buffer allocation reached 8 MiB. The normal image was then
 restored, both workspace Pod UIDs remained unchanged, and two authenticated
 reconnect probes passed. The diagnostic collectors were stopped. This was an
 early failed observation, not a successful 60-minute soak.
+
+## Validator mitigation and retained timeline replay
+
+A credential-free exact-runtime reproduction subsequently isolated a matching
+native surge to Maglev optimization of the pinned SDK's generated validator.
+The default and no-Maglev comparisons, platform limits and rerunnable image
+check are documented in [validator memory qualification](gateway-validator-memory.md).
+This identifies a reachable mechanism; it does not establish the contents of
+the live frames captured before the OOM.
+
+Source `25259cb` adds an explicit gateway-only `--no-maglev` launch argument and
+includes retained timeline fix `9b44328`. The combined source passed 388
+unit/socket tests (two skipped), lint, typecheck, build and the release,
+qualification and PR-title checks. The local image
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`
+completed 100,000 valid SDK message validations in 837 ms, with independent peak
+RSS of 355,119,104 bytes and no OOM. That small validator workload is not a
+gateway throughput benchmark.
+
+To avoid another local disk exhaustion, this image overlays freshly compiled
+source and package metadata on the exact normal image listed above. Its
+dependency lock and production dependency declarations are unchanged. It is a
+local source candidate, not a qualification of a newly built release image.
+
+After deployment at 18:49:53 UTC on 2026-09-25, PID 1's actual command included
+the mitigation flag and two authenticated reconnect probes passed. The exact
+stopped-agent live replay now acknowledges retained membership and returns a
+native timeline unavailable error for uncached history, with no `rpc_error` or
+fabricated empty-success response. The workspace UID and Suspended state were
+unchanged, and no Pod started. Both existing active test workspace Pod UIDs and
+restart counts also remained unchanged through the gateway-only rollout.
+
+This verifies the subscription protocol correction, not uncached transcript
+access while compute is stopped. A longer read-only memory observation is in
+progress; #72 remains open pending its outcome and further candidate validation.
