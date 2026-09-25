@@ -13,7 +13,7 @@ For the prepared local session, keep the operator's port-forward and loopback re
 | Use SSL | Off for this loopback relay |
 | Password | Paste from the operator-provided private file; do not put it in notes or screenshots |
 
-The relay accepts connections only on localhost and verifies TLS to the gateway. This path tests the desktop protocol and authentication, **not** desktop certificate validation. A direct TLS test instead uses the gateway's forwarded TLS port, **Use SSL** on, and a certificate trusted by the desktop; do not disable certificate checks. If the local connection stops, ask the operator to restore the forward and relay before retrying. Select the newly added host rather than the app's built-in local daemon.
+The relay accepts connections only on localhost and verifies TLS to the gateway. This path tests the desktop protocol and authentication, **not** desktop certificate validation. A direct TLS test instead uses the gateway's forwarded TLS port, **Use SSL** on, and a certificate trusted by the desktop; do not disable certificate checks. Run the forward and relay independently of the desktop process before testing app quit/reopen; helper sessions owned by the app under test may terminate with it. If the local connection stops, ask the operator to restore the forward and relay before retrying. Select the newly added host rather than the app's built-in local daemon.
 
 ## Run and record
 

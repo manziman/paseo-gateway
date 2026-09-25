@@ -421,5 +421,21 @@ messages and activity. Two-workspace Desktop isolation therefore passed in this
 session. Fresh-preference, zero-Ready cold-start discovery and reconnect/history
 checks remain separate acceptance gates.
 
-A 35-minute read-only memory sampler is running for #72; its initial observations
-do not yet establish long-term stability or explain the historical restarts.
+The planned 35-minute read-only memory sampler for #72 was interrupted after
+19.5 minutes when its local helper session ended. Its partial observations do
+not qualify a completed soak, establish long-term stability, or explain the
+historical restarts.
+
+## Desktop reconnect test setup
+
+After quitting and reopening the app, the operator saw both saved histories but
+the host remained reconnecting. Both localhost helper ports refused connections
+and their original tool sessions were gone; the gateway remained Ready with
+zero restarts. Visible history could be cached, so this is not a server reconnect
+pass.
+
+The temporary localhost forward and TLS-verifying relay were restored as
+user-scoped macOS services independent of the desktop process. The real desktop
+Origin handshake and two fresh authenticated SDK project-list round trips then
+passed. Manual confirmation that the reconnect banner clears remains pending.
+No gateway deployment or user workspace was changed during recovery.
