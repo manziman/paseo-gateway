@@ -399,6 +399,49 @@ export class GatewaySession {
     };
   }
 
+  /** A stopped checkout retains directory metadata, but not its transcript.
+   * Retained storage is unmounted; ephemeral storage may already be gone.
+   * Membership may be acknowledged without opening a daemon
+   * only for an exact UID-bound retained agent. Re-read authority after storage
+   * and route lookups so an archive, replacement, or revocation cannot race ACK.
+   */
+  private async retainedTimelineAgent(workspace: Workspace, publicId: string) {
+    if (!this.options.inventoryStore) throw new Error("Retained agent inventory is unavailable");
+    const entries = await readArchivedInventory(
+      this.options.inventoryStore,
+      workspace,
+      undefined,
+      workspace.spec.residency === "Archived" ? "archived" : "suspended",
+      this.options.agentRouting,
+    );
+    const agent = entries.find((entry) => entry.agent.id === publicId)?.agent;
+    if (!agent) throw new Error("Agent is not present in UID-bound retained inventory");
+    if (this.options.agentRouting) {
+      const resolved = await this.options.agentRouting.resolveAgent(publicId, [workspace]);
+      if (
+        resolved.workspace.metadata.uid !== workspace.metadata.uid ||
+        resolved.backendAgentId !== agent.id
+      )
+        throw new Error("Retained agent route changed");
+    }
+    const { workspaces } = await this.records();
+    const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
+    if (
+      !current ||
+      current.metadata.uid !== workspace.metadata.uid ||
+      current.spec.projectRef !== workspace.spec.projectRef ||
+      current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+      current.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
+      current.spec.residency !== workspace.spec.residency ||
+      current.status?.phase !== workspace.status?.phase ||
+      current.spec.residency === "Running" ||
+      current.status?.storageDeletedAt
+    )
+      throw new Error("Retained agent workspace stopped, replaced, or access revoked");
+    if (this.closed) throw new Error("Gateway session closed");
+    return agent;
+  }
+
   /** Wait only for a caller-authorized, UID-bound workspace already being created. */
   private async readyForProviderSnapshot(
     selected: Workspace,
@@ -1206,6 +1249,7 @@ export class GatewaySession {
       return;
     if (message.type === "agent.timeline.set_subscription.request") {
       const grouped = new Map<string, string[]>();
+      const retained: { workspace: Workspace; agentId: string }[] = [];
       for (const id of message.agentIds) {
         const resolved = this.options.agentRouting
           ? await this.options.agentRouting.resolveAgent(id, workspaces)
@@ -1213,13 +1257,28 @@ export class GatewaySession {
         const route = resolved
           ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
           : parseScopedId(id);
+        const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
+        if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
+        if (workspace.spec.residency !== "Running") {
+          retained.push({
+            workspace,
+            agentId: this.options.agentRouting ? route.backendId : id,
+          });
+          continue;
+        }
         grouped.set(route.workspaceId, [
           ...(grouped.get(route.workspaceId) ?? []),
           route.backendId,
         ]);
       }
+      // Reject a missing or stale retained source before changing membership on
+      // any live backend. The later common fence covers intervening changes.
+      for (const entry of retained)
+        await this.retainedTimelineAgent(entry.workspace, entry.agentId);
       for (const id of new Set([...this.connections.keys(), ...grouped.keys()])) {
-        const workspace = active.find((w) => w.metadata.name === id);
+        const workspace = active.find(
+          (w) => w.metadata.name === id && w.spec.residency === "Running",
+        );
         if (!workspace) continue;
         const connection = await this.connection(workspace);
         if (this.options.agentRouting) {
@@ -1240,11 +1299,84 @@ export class GatewaySession {
           agentIds: grouped.get(id) ?? [],
         });
       }
+      // A stopped agent has no daemon stream to subscribe to. Its retained
+      // membership is valid only while the exact authorized UID and snapshot
+      // remain present; the subsequent timeline fetch reports unavailable.
+      if (retained.length) {
+        // A prior target can change while a later target's record is read.
+        // Fence the whole acknowledged membership against one fresh authority
+        // view after every awaited retained lookup.
+        if (this.options.agentRouting) {
+          for (const entry of retained)
+            await this.options.agentRouting.resolveAgent(entry.agentId, [entry.workspace]);
+        }
+        const current = (await this.records()).workspaces;
+        for (const { workspace } of retained) {
+          const row = current.find((item) => item.metadata.name === workspace.metadata.name);
+          if (
+            !row ||
+            row.metadata.uid !== workspace.metadata.uid ||
+            row.spec.projectRef !== workspace.spec.projectRef ||
+            row.spec.credentialProfile !== workspace.spec.credentialProfile ||
+            row.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
+            row.spec.residency !== workspace.spec.residency ||
+            row.status?.phase !== workspace.status?.phase ||
+            row.spec.residency === "Running" ||
+            row.status?.storageDeletedAt
+          )
+            throw new Error("Retained timeline workspace stopped, replaced, or access revoked");
+        }
+      }
+      if (this.closed) return;
       this.options.emit({
         type: "agent.timeline.set_subscription.response",
         payload: { requestId, agentIds: message.agentIds },
       });
       return;
+    }
+    if (
+      message.type === "fetch_agent_timeline_request" &&
+      (this.options.agentRouting || message.agentId.includes("~"))
+    ) {
+      const resolved = this.options.agentRouting
+        ? await this.options.agentRouting.resolveAgent(message.agentId, workspaces)
+        : undefined;
+      const route = resolved
+        ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
+        : parseScopedId(message.agentId);
+      const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
+      if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
+      if (workspace.spec.residency !== "Running") {
+        const agent = await this.retainedTimelineAgent(
+          workspace,
+          this.options.agentRouting ? route.backendId : message.agentId,
+        );
+        this.options.emit({
+          type: "fetch_agent_timeline_response",
+          payload: {
+            requestId,
+            agentId: message.agentId,
+            agent,
+            direction: message.direction ?? "tail",
+            projection: message.projection ?? "projected",
+            epoch: "",
+            reset: false,
+            staleCursor: false,
+            gap: false,
+            window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
+            startCursor: null,
+            endCursor: null,
+            hasOlder: false,
+            hasNewer: false,
+            entries: [],
+            error:
+              workspace.spec.retentionPolicy?.storage === "Ephemeral"
+                ? "Workspace is stopped; ephemeral storage was released and retained metadata has no transcript"
+                : "Workspace is stopped; transcript is unavailable while compute is stopped, and retained metadata has no history",
+          },
+        });
+        return;
+      }
     }
     if (
       message.type === "fetch_agent_request" &&

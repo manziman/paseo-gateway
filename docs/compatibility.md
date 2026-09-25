@@ -162,6 +162,11 @@ archived with their PVCs retained.
   snapshots explicitly marked unavailable for live provider operations. A failed
   workspace without a captured snapshot reports unavailable inventory. Metadata
   excludes transcripts, pending permissions and provider persistence details.
+  Opening a retained agent does not start its workspace: the gateway acknowledges
+  its timeline membership from the UID-bound snapshot, then reports history as
+  unavailable while compute is stopped. A desktop-local cached transcript can
+  remain visible, but uncached history cannot be reconstructed from metadata.
+  Archived Ephemeral storage has been released, so its transcript may be gone.
 - File/Git operations and terminal traffic route to their workspace. Attachment
   uploads are bounded and staged until an agent operation identifies the target;
   HTTP downloads use short-lived, single-use gateway handles. Both paths retain
