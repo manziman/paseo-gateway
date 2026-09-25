@@ -3,6 +3,7 @@
 // account, image, credential, or error text from kubectl.
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import YAML from "yaml";
 
 export function parseArgs(argv) {
@@ -10,18 +11,25 @@ export function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 2) {
     const flag = argv[i];
     if (
-      !["--context", "--namespace", "--storage-class", "--values"].includes(flag) ||
+      !["--context", "--namespace", "--storage-class", "--network-mode", "--values"].includes(
+        flag,
+      ) ||
       !argv[i + 1]
     ) {
       throw new Error(
-        "usage: node scripts/eks-preflight.mjs --context CONTEXT --namespace NAMESPACE --storage-class CLASS --values LOCAL_VALUES_FILE",
+        "usage: node scripts/eks-preflight.mjs --context CONTEXT --namespace NAMESPACE --storage-class CLASS --network-mode standard|auto --values LOCAL_VALUES_FILE",
       );
     }
     options[flag.slice(2)] = argv[i + 1];
   }
-  if (!["context", "namespace", "storage-class", "values"].every((key) => options[key])) {
+  if (
+    !["context", "namespace", "storage-class", "network-mode", "values"].every(
+      (key) => options[key],
+    ) ||
+    !["standard", "auto"].includes(options["network-mode"])
+  ) {
     throw new Error(
-      "explicit context, namespace, storage class, and local values file are required",
+      "explicit context, namespace, storage class, network mode, and local values file are required",
     );
   }
   return options;
@@ -34,16 +42,24 @@ export function assess({
   csiDrivers,
   cni,
   autoNetworkConfig,
+  networkMode,
   crds,
   permissions,
   values,
 }) {
   const checks = [];
   const add = (id, status, reason) => checks.push({ id, status, reason });
+  const namespaceReady =
+    typeof namespace?.metadata?.uid === "string" &&
+    namespace.metadata.uid.length > 0 &&
+    namespace?.status?.phase === "Active" &&
+    !namespace?.metadata?.deletionTimestamp;
   add(
     "namespace",
-    namespace?.metadata?.name ? "PASS" : "BLOCKED",
-    namespace?.metadata?.name ? "Selected namespace exists" : "Namespace unavailable or unreadable",
+    namespaceReady ? "PASS" : "BLOCKED",
+    namespaceReady
+      ? "Selected namespace has a UID and is Active"
+      : "Selected namespace must be readable, Active, and UID-recorded",
   );
   const k8s = version?.serverVersion?.gitVersion;
   const supported = /^v?1\.(32|33|34|35)\./.test(k8s ?? "");
@@ -55,6 +71,15 @@ export function assess({
       : "Version unavailable or outside chart's declared 1.32–1.35 range",
   );
   const provisioner = storageClass?.provisioner;
+  add(
+    "storage-class-selection",
+    storageClass?.metadata?.name && values?.workspace?.storageClass === storageClass.metadata.name
+      ? "PASS"
+      : "BLOCKED",
+    storageClass?.metadata?.name && values?.workspace?.storageClass === storageClass.metadata.name
+      ? "Inspected StorageClass matches the chart's selected class"
+      : "Chart StorageClass must exactly match the inspected class",
+  );
   const recognized = ["ebs.csi.aws.com", "ebs.csi.eks.amazonaws.com"].includes(provisioner);
   add(
     "ebs-csi",
@@ -84,27 +109,28 @@ export function assess({
   const strict = awsNode?.env?.some(
     (item) => item.name === "NETWORK_POLICY_ENFORCING_MODE" && item.value === "strict",
   );
-  const autoMode = provisioner === "ebs.csi.eks.amazonaws.com";
+  const autoMode = networkMode === "auto";
+  const standardMode = networkMode === "standard";
   const autoEnabled = autoNetworkConfig?.data?.["enable-network-policy-controller"] === "true";
   add(
     "network-policy-controller",
-    autoMode ? (autoEnabled ? "PASS" : "BLOCKED") : enabled ? "PASS" : "BLOCKED",
+    autoMode ? (autoEnabled ? "PASS" : "BLOCKED") : standardMode && enabled ? "PASS" : "BLOCKED",
     autoMode
       ? autoEnabled
         ? "Auto Mode network policy controller flag observed; enforcement still requires live probes"
         : "Auto Mode network policy controller flag not confirmed"
-      : enabled
+      : standardMode && enabled
         ? "VPC CNI policy agent appears enabled; enforcement requires live probes"
-        : "VPC CNI policy agent not confirmed enabled",
+        : "Selected VPC CNI mode or policy agent not confirmed enabled",
   );
   add(
     "policy-at-startup",
-    autoMode ? "BLOCKED" : strict ? "PASS" : "BLOCKED",
+    autoMode ? "BLOCKED" : standardMode && strict ? "PASS" : "BLOCKED",
     autoMode
       ? "Selected Auto Mode NodeClass startup policy requires private review and live startup probe"
-      : strict
+      : standardMode && strict
         ? "VPC CNI strict startup mode observed"
-        : "Strict startup mode not observed; a new pod may start with default allow",
+        : "Selected VPC CNI mode or strict startup setting not confirmed",
   );
   add(
     "namespace-rbac",
@@ -115,12 +141,27 @@ export function assess({
       ? "Operator fixture verbs authorized; installed gateway ServiceAccount requires separate validation"
       : "One or more operator fixture verbs denied or unverified",
   );
+  const crdsReady =
+    crds?.length === 3 &&
+    crds.every(
+      (crd, index) =>
+        crd?.metadata?.name ===
+          `${["paseoprojects", "paseoworkspaces", "paseocredentialprofiles"][index]}.paseo-gateway.manziman.github.io` &&
+        crd?.spec?.group === "paseo-gateway.manziman.github.io" &&
+        crd?.spec?.scope === "Namespaced" &&
+        crd?.spec?.versions?.some(
+          (version) => version.name === "v1alpha1" && version.served && version.storage,
+        ) &&
+        crd?.status?.conditions?.some(
+          (condition) => condition.type === "Established" && condition.status === "True",
+        ),
+    );
   add(
     "required-crds",
-    crds?.length === 3 && crds.every(Boolean) ? "PASS" : "BLOCKED",
-    crds?.length === 3 && crds.every(Boolean)
-      ? "Three required CRDs are observable; schema compatibility still needs review"
-      : "One or more chart CRDs are absent or unreadable; cluster-scoped installation needs separate operator handling",
+    crdsReady ? "PASS" : "BLOCKED",
+    crdsReady
+      ? "Three expected namespaced CRDs serve v1alpha1 and are Established; compare schemas separately"
+      : "Three expected namespaced v1alpha1 CRDs must be Established before fixture use",
   );
   add(
     "gateway-serviceaccount-rbac",
@@ -138,14 +179,44 @@ export function assess({
   );
   const egressRules = values?.networkPolicy?.egress?.rules;
   const profileRules = values?.networkPolicy?.egress?.profiles;
+  const specificSelector = (selector) =>
+    (selector?.matchLabels && Object.keys(selector.matchLabels).length > 0) ||
+    (Array.isArray(selector?.matchExpressions) && selector.matchExpressions.length > 0);
+  const narrowCidr = (cidr) => {
+    if (typeof cidr !== "string") return false;
+    const [address, prefix, extra] = cidr.split("/");
+    const family = isIP(address);
+    const bits = Number(prefix);
+    return (
+      !extra &&
+      (family === 4 || family === 6) &&
+      /^\d+$/.test(prefix ?? "") &&
+      bits > 0 &&
+      bits <= (family === 4 ? 32 : 128)
+    );
+  };
+  const scopedRule = (rule) =>
+    Array.isArray(rule?.to) &&
+    rule.to.length > 0 &&
+    rule.to.every(
+      (target) =>
+        specificSelector(target?.namespaceSelector) ||
+        specificSelector(target?.podSelector) ||
+        narrowCidr(target?.ipBlock?.cidr),
+    ) &&
+    Array.isArray(rule?.ports) &&
+    rule.ports.length > 0 &&
+    rule.ports.every((port) => port?.port !== undefined && port?.protocol === "TCP");
+  const rules = [
+    ...(Array.isArray(egressRules) ? egressRules : []),
+    ...(Array.isArray(profileRules) ? profileRules.flatMap((profile) => profile.rules ?? []) : []),
+  ];
   add(
     "configured-egress",
-    egress && (egressRules?.length || profileRules?.some((profile) => profile.rules?.length))
-      ? "PASS"
-      : "BLOCKED",
-    egress && (egressRules?.length || profileRules?.some((profile) => profile.rules?.length))
-      ? "At least one outbound rule requested; approved destination and effective enforcement require live review"
-      : "No configured outbound destination beyond chart DNS/gateway allowance",
+    egress && rules.length > 0 && rules.every(scopedRule) ? "PASS" : "BLOCKED",
+    egress && rules.length > 0 && rules.every(scopedRule)
+      ? "Outbound rules are destination- and TCP-port-scoped; approval and enforcement require live review"
+      : "Outbound rules must explicitly scope destinations and TCP ports; empty or all-destination rules do not qualify",
   );
   const digestPattern = /^sha256:[a-f0-9]{64}$/;
   const pinnedImages =
@@ -163,13 +234,28 @@ export function assess({
     typeof values?.transport?.tls?.gatewaySecret === "string" &&
     values.transport.tls.gatewaySecret.length > 0 &&
     typeof values?.transport?.tls?.workspaceSecret === "string" &&
-    values.transport.tls.workspaceSecret.length > 0;
+    values.transport.tls.workspaceSecret.length > 0 &&
+    values.transport.tls.gatewaySecret !== values.transport.tls.workspaceSecret;
   add(
     "chart-transport-tls",
     tlsRequested ? "PASS" : "BLOCKED",
     tlsRequested
       ? "Chart TLS and two Secret names configured; Secret keys, trust and handshake require live validation"
-      : "TLS and separate gateway/workspace Secret names required in local values",
+      : "TLS and distinct gateway/workspace Secret names required in local values",
+  );
+  const hosts = values?.gateway?.allowedHosts;
+  const approvedHost =
+    typeof hosts === "string" &&
+    hosts
+      .split(",")
+      .map((host) => host.trim())
+      .some((host) => host && !["localhost", "127.0.0.1", "::1", "*"].includes(host));
+  add(
+    "gateway-host-allowlist",
+    approvedHost ? "PASS" : "BLOCKED",
+    approvedHost
+      ? "An explicit non-loopback gateway host is configured; ingress and TLS identity still need validation"
+      : "Set an explicit approved ingress host; chart localhost defaults are insufficient",
   );
   add(
     "backend-transport",
@@ -318,6 +404,7 @@ function main() {
     csiDrivers,
     cni,
     autoNetworkConfig,
+    networkMode: options["network-mode"],
     crds,
     permissions,
     values,

@@ -1,5 +1,22 @@
 # Local parity qualification (partial)
 
+This document is a chronological evidence log, not a claim that every historical
+candidate passed. Later sections supersede earlier pending observations only for
+the explicitly repeated checks and recorded images. Current pre-EKS status:
+
+| Area | Latest local status |
+| --- | --- |
+| Claude/Codex/OpenCode prompts and idle/active gateway recovery | Passed on the recorded development candidates; exact release artifacts remain separate |
+| GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
+| Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
+| Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
+| Scoped CLI permission resolution | Real aggregate listing passed; denial exposed a disconnect race tracked in #77 |
+| Fresh-preference zero-Ready Desktop/ref picker | Pending final-candidate operator check (#65/#67) |
+| Stopped uncached transcript | Subscription correction passed; retained PVC history implementation/acceptance tracked in #76 |
+| Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
+| Gateway memory | Targeted reproduction/mitigation and 80-minute process-age observation passed, with a recorded host-sleep sampling gap |
+| EKS CSI, network enforcement, node-loss fencing and exact cloud candidate | Pending isolated operator-led validation (#61) |
+
 Observation date: 2026-09-24. Source branch: `feat/full-parity`; candidate images
 were built from the working tree based on commit `b351722`, before candidate
 commits. These are local fixture
@@ -721,5 +738,124 @@ unchanged, and no Pod started. Both existing active test workspace Pod UIDs and
 restart counts also remained unchanged through the gateway-only rollout.
 
 This verifies the subscription protocol correction, not uncached transcript
-access while compute is stopped. A longer read-only memory observation is in
-progress; #72 remains open pending its outcome and further candidate validation.
+access while compute is stopped.
+
+The same normal candidate subsequently reached 80 minutes of process age at
+20:09:53 UTC with zero restarts, unchanged image/Pod UID/process start, and no
+recorded termination. There were 21,778 external memory samples over 78 minutes
+50 seconds: RSS stayed at 327–356 MiB and cgroup usage peaked at 370 MiB. All
+16 authenticated project/retained-inventory SDK polls passed. Both existing
+workspace Pod UIDs and restart counts remained unchanged.
+
+The host slept during the observation, producing a 229-second sampling gap;
+this is not an uninterrupted 80-minute soak. It exceeds the previously observed
+15–38-minute recurrence intervals and supports the targeted mitigation, without
+establishing arbitrary-load or EKS stability. The release's exact ARM64 gateway
+artifact must also pass the bounded validator regression before signing;
+representative EKS load and failure observation remain part of #61.
+
+
+## Catalog scope, invalidation and missing-reference recovery
+
+On 2026-09-25, five additional SDK/Kubernetes checks passed against gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+Three newly created project/profile scopes used the existing authorized Claude
+credential reference and workspace image `paseo-workspace:parity-final5`.
+Two scopes discovered catalogs independently, with distinct durable fingerprints
+and matching requested `cwd`. Their runtime/provider configurations were equivalent
+apart from a harmless ConfigMap-backed environment value; this establishes scope
+and fingerprint separation, not different model contents.
+
+Changing only one fixture ConfigMap's resource version caused that catalog to
+be rediscovered while the other fingerprint remained unchanged. A third profile's
+missing ConfigMap produced no verified-ready result; creating that reference
+allowed subsequent discovery to complete. No user workspace or agent was created,
+and no model prompt was sent. Completed probes were checked before UID-fenced
+cleanup of the owned project/profile/configuration and catalog records.
+
+The first fixture attempt correctly hit the reserved runtime-environment-name
+admission rule; the harmless test variable was changed to a non-reserved name
+before these checks ran. These automated results complement the earlier native
+probe and interrupted-discovery recovery evidence. They do not replace the
+fresh-preference, zero-Ready Desktop check or prove EKS network enforcement.
+
+
+## Secured checkout receipt across Kubernetes restarts
+
+On 2026-09-25, the init-only receipt qualification passed on the normal gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+It used tiny fixture derivatives of workspace base
+`sha256:f7e76745f971ef599a959e504c7af55601bb68cac11f372a58a8d41b7686cd63`,
+with the current product initializer/receipt code and an instrumented Git wrapper.
+The wrapper injected failures and recorded only receipt counters/permissions.
+These are fault-injection derivatives, not unmodified release-image qualification.
+
+| Check | Observed result |
+| --- | --- |
+| DNS failure across init restarts | Exactly three fetches, two init restarts, one Pod-wide start/deadline receipt; `CheckoutDnsUnavailable`, attempts 3 |
+| Permanent authentication failure | Exactly one fetch across two init restarts; `CheckoutAuthenticationFailed`, attempts 1; daemon never started |
+| Clean recovery | New Pod/fresh budget, same PVC, successful checkout and retained sentinel |
+| Subsequent completed-checkout restart | Dirty file preserved; no additional Git fetch |
+| Receipt isolation | Dedicated 1 MiB init-only volume and private ownership/mode; daemon could not read receipt |
+
+Clean/DNS/authentication fixture image digests were respectively
+`sha256:10f92d9268f8e6a7744094f16160519e17e81df85c45c5ac7569ded9f82f32e7`,
+`sha256:a925f0493178e21cd2e22289487df0ab61316369502ca4217676937a155c1a0b`,
+and `sha256:e1f2df8e40de7be687057911a9f8bb511608a4629b6eeb91fdb5c9224343c2c2`.
+No provider prompt was dispatched. Cleanup of the permanently failing fixture
+first required removing its artificial fault image and replacing only its owned
+Pod so normal teardown could run. Both fixtures then completed controller
+teardown and their exact UID-recorded workspaces, PVCs, projects and profiles
+were observed deleted; no archive or finalizer safety check was bypassed.
+
+
+## Capacity admission and failed teardown rehearsal
+
+On 2026-09-25, isolated public-repository fixtures on Docker Desktop verified
+project capacity and scheduler diagnostics against the normal gateway candidate.
+A project cap of one admitted exactly one of two concurrent SDK creation calls.
+A separately submitted over-cap Workspace stayed Pending with a capacity message
+and no Pod, while the admitted worker stayed Ready. A second fixture requested
+an impossible CPU allocation; its Pending status exposed
+`lastFailure.reason=Unschedulable`. The final harness run exited successfully and
+independent UID checks found none of its 17 recorded resources remaining.
+
+Two earlier harness cleanup attempts needed correction: first they used the
+normal Ready-workspace path for an unschedulable Pod, then deletion while desired
+residency was Running allowed controller recreation. UID guards refused the
+changed Pod. The final cleanup first changed desired residency to Suspended,
+then removed the exact owned Pod and waited for absence. These fixture mistakes
+were not represented as product failures or successful clean runs.
+
+A separate retained fixture used a harmless teardown hook that incremented a
+counter and exited nonzero. Its archive request entered Failed without a
+`teardownCompletedAt` timestamp. Exact Pod/PVC UIDs and a sentinel remained;
+a durable teardown intent existed, no completion marker existed, and a six-second
+recheck showed the counter was still one. This proves retained failure state and
+no immediate automatic hook replay, not successful archival. The disposable
+fixture was then explicitly removed with UID checks: all seven recorded resources
+were absent, and no protective finalizer was removed. Both original user Pod UIDs
+remained unchanged throughout these rehearsals.
+
+These checks do not establish live API-outage handling, OOM/eviction recovery or
+node-partition fencing. Those remain separately graded failure scenarios.
+
+## Real permission prompt regression
+
+Two actual Claude agents in separate owned workspaces requested permission for
+harmless fixture-file writes. The scoped in-pod CLI aggregated both through
+`permit ls --json`. Its `permit deny <agent> --all --json` call returned, but the
+original selected prompt remained pending through the bounded deadline. The
+second workspace stayed pending. Approval and file-isolation completion were
+not claimed for this failed run.
+
+This occurred on gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`
+and workspace
+`sha256:cba69c0dfe4e5eb4f1b0ddf3275a6a0b7aaeb54582518770c981fe3356a75996`.
+An offline socket regression subsequently reproduced a received permission reply
+being dropped when an immediate client close raced asynchronous authorization.
+The correction and final live replay are tracked in #77. Both live fixtures were
+removed after normal controller teardown and observed Pod absence, using exact
+UIDs; cleanup required reconnecting after the first workspace archive closed the
+harness session.
