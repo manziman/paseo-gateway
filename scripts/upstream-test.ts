@@ -313,9 +313,43 @@ try {
   );
   const terminals: string[] = [];
   for (const id of ["one", "two"]) {
+    docker(
+      "exec",
+      "--user",
+      "0",
+      `${prefix}-${id}`,
+      "sh",
+      "-c",
+      `printf '%s' '${id}' > /workspaces/${id}/${id}-only.txt; chown 1000:1000 /workspaces/${id}/${id}-only.txt`,
+    );
     const file = await active.readFile(`/workspaces/${id}`, "marker.txt");
     assert.equal(file.kind, "text");
     if (file.kind === "text") assert.equal(Buffer.from(file.bytes).toString("utf8"), id);
+    const lookup = (query: string) =>
+      active.getDirectorySuggestions({
+        query,
+        cwd: `/workspaces/${id}`,
+        includeFiles: true,
+        includeDirectories: false,
+        matchMode: "suffix",
+        limit: 1,
+      });
+    const common = await lookup("marker.txt");
+    assert.equal(common.error, null);
+    assert.deepEqual(common.entries, [{ path: "marker.txt", kind: "file" }]);
+    const own = await lookup(`${id}-only.txt`);
+    assert.equal(own.error, null);
+    assert.deepEqual(own.entries, [{ path: `${id}-only.txt`, kind: "file" }]);
+    const other = id === "one" ? "two" : "one";
+    for (const query of [
+      `${other}-only.txt`,
+      `../${other}/${other}-only.txt`,
+      `/workspaces/${other}/${other}-only.txt`,
+    ]) {
+      const outside = await lookup(query);
+      assert.equal(outside.error, null);
+      assert.deepEqual(outside.entries, [], "Suggestions must remain inside the selected Pod");
+    }
     const terminal = await active.createTerminal(`/workspaces/${id}`, `Terminal ${id}`, undefined, {
       workspaceId: id,
     });

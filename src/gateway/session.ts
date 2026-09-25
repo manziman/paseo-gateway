@@ -77,6 +77,7 @@ const forwarded = new Set([
   "clear_agent_attention",
   "wait_for_finish_request",
   "list_commands_request",
+  "directory_suggestions_request",
   "file_explorer_request",
   "file.upload.request",
   "file_download_token_request",
