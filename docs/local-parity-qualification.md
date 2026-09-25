@@ -286,3 +286,22 @@ lint, build, 37 release tests, 14 qualification tests, and 14 PR-title tests.
 Manual observation of Desktop's live tool widgets after reconnecting remains
 pending; the SDK test does not assert desktop rendering or guarantee a provider
 will emit reasoning events for every turn.
+
+## Project source-ref selection
+
+The #67 implementation passed a local Kubernetes test through the pinned SDK
+against the gateway and workspace images recorded in the preceding section.
+Remote branch suggestions, bounded query filtering, and validation of existing,
+unused, and invalid branch names passed. A worktree-style request selected a
+nondefault origin branch using its fully qualified remote ref and created a new
+local branch in an isolated workspace.
+
+Direct Git inspection in that workspace's UID-bound Pod confirmed the requested
+local branch and equality of `HEAD`, `FETCH_HEAD`, and the selected source ref's
+advertised commit. The fixture reached Ready, then archived successfully with
+its Pod removed and original PVC preserved. After verifying teardown and storage
+ownership, the fixture CR and PVC were deleted with exact UID preconditions.
+This qualifies the SDK creation
+path and selected-ref checkout; interactive Desktop picker rendering remains a
+manual check. Custom workspace images must include the ref-inspection helper;
+older image overrides were not qualified by this run.
