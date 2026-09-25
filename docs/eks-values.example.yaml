@@ -16,6 +16,9 @@ transport:
     enabled: true
     gatewaySecret: paseo-gateway-tls
     workspaceSecret: paseo-workspace-tls
+gateway:
+  # Explicit client-facing host allowed by the gateway. Match the TLS SAN.
+  allowedHosts: gateway.example.invalid
 networkPolicy:
   enabled: true
   egress:
