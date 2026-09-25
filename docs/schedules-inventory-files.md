@@ -29,3 +29,13 @@ Download-token responses contain a gateway handle rather than a daemon token. Th
 ## Local live acceptance
 
 Run `node --import tsx scripts/protocol-live.ts CONFIG.json REPORT.json` against an explicitly selected Docker Desktop namespace and authorized Claude test project. The private configuration provides `context`, `namespace`, `project`, `identitySecret`, and `tls` (`caFile`, `serverName`). The harness verifies a reused-agent schedule, label persistence across client reconnect, and retained inventory after suspension. It writes a redacted report with image digests and a separate mode-0600 private cleanup file. Its schedule is deleted, and its test workspace is left suspended with its PVC retained. Backend shutdown can close the client's gateway socket, so the harness reconnects before reading the retained snapshot.
+
+The transfer negative contracts have separate credential-free loopback tests in
+`tests/download-failures.test.ts` and `tests/upload-session-recovery.test.ts`.
+They verify expired/scoped-denied handles never reach the backend, real HTTP
+client cancellation and origin revocation abort an upstream stream and release
+capacity, malformed sizes and backend failures cannot return a successful
+incorrect download or expose upstream error bodies, and the pinned SDK cannot
+reuse a staged upload after session or gateway replacement. These tests complement
+the existing two-daemon byte-integrity checks; they are not a live Kubernetes or
+Desktop failure-injection claim.
