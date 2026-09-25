@@ -174,18 +174,23 @@ try {
     }),
   );
 } finally {
+  const cleanupFailures: string[] = [];
   if (createdContainer) {
     try {
       docker("rm", "--force", prefix);
     } catch {
-      /* best-effort owned cleanup */
+      cleanupFailures.push("ContainerCleanupFailed");
     }
   }
   for (const volume of volumes) {
     try {
       docker("volume", "rm", volume);
     } catch {
-      /* report retained owned volume separately */
+      cleanupFailures.push("VolumeCleanupFailed");
     }
+  }
+  if (cleanupFailures.length) {
+    console.error(JSON.stringify({ cleanupFailures }));
+    process.exitCode = 1;
   }
 }

@@ -141,3 +141,36 @@ Observed workspace digest: `sha256:4895730f269c6ebc297f9b039d0b661beb7f63036dc3a
 Actual elapsed-time expiry is still untested; early renewal and real revocation do
 not establish that separate condition. The harness emits no repository, App,
 installation, token or PR identity in its public report.
+
+## Cold-start project model discovery
+
+The manual Desktop test reported a Models picker stuck on Loading. An SDK probe
+reproduced rejection of `/projects/<id>` as a workspace path. After adding
+project-scoped discovery, a real daemon probe found a second problem: the pinned
+daemon returned an empty legacy `entries` array alongside a populated
+`compactSnapshot`. Expanding that snapshot with the upstream codec fixed the
+catalog reader. A compact-only regression and a credential-free real daemon
+contract are now included in CI for both supported CPU architectures.
+
+On 2026-09-24, Docker Desktop delivered a project-scoped asynchronous catalog with
+15 ready Claude models while every user workspace remained suspended. The
+temporary probe used an isolated checkout and was removed before publication.
+A gateway replacement interrupted the preceding probe; the replacement gateway
+automatically reclaimed its UID-bound resources after the stale-run deadline,
+retried discovery, and delivered the catalog to an already waiting subscription.
+No agent or model prompt was created by this catalog test.
+
+Observed gateway digest:
+`sha256:569cddaeb8c11b82ad85012eac0e16adb22ddb5572fb4c420cabe113458c9775`.
+The probe used the previously recorded workspace image
+`sha256:a23986a8fa639a50f58aa170951e99d01c16b5993ad81d05d18dec39abfb1edb`.
+The pinned Desktop source proof verifies project-cwd cache routing and model
+selection from a ready snapshot. Actual Desktop model selection and completion
+of the first prompted Chat remain pending the operator's observation.
+
+The tested gateway image predates the subsequent same-fingerprint, known-provider
+error-row enhancement, which has unit coverage. Cross-profile live isolation and
+initial-discovery failure UI qualification remain open. See
+[provider discovery](provider-discovery.md) for the bounded cleanup behavior and
+the pinned Desktop's limitation when a failed first probe has no known provider
+identity.
