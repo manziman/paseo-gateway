@@ -30,7 +30,8 @@ export async function lostAckProxy(target: string) {
     }
   };
   server.on("connection", (front, request) => {
-    const url = new URL(request.url ?? "/ws", target);
+    // The fixture has exactly one fixed destination; a client cannot reroute it.
+    const url = new URL(target);
     const protocols = request.headers["sec-websocket-protocol"]
       ?.split(",")
       .map((part) => part.trim());
