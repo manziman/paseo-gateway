@@ -573,3 +573,38 @@ After the storage recovery, both user test agents were idle and their complete
 current timelines were readable, with 11 and 6 entries respectively, no page
 gaps, and their expected test replies. No same-agent pre-incident snapshot was
 available for an exact byte-for-byte history comparison. No prompt was resent.
+
+## Pod-wide checkout budget qualification
+
+A later local qualification used workspace image
+`sha256:f7e76745f971ef599a959e504c7af55601bb68cac11f372a58a8d41b7686cd63`
+with gateway image
+`sha256:113c37e0af111775a52adef7dcbcd662a2e581a1e9fcab9e06bbd5d90cafabbf`.
+Two temporary derivative images changed only the Git executable used for fault
+injection; they did not change the production initializer.
+
+The DNS derivative (`sha256:c83d8dfbe1aaf718ce0acd1fabfe61b4d69c0da6eab51444ba394d1aeac23368`)
+made exactly three fetch calls across at least two checkout-container restarts.
+The permanent-authentication derivative
+(`sha256:40218ddcde18f171053fde9dea6fc66ecf490060e69bc4ec84f9993bdf882778`)
+made exactly one fetch across at least two restarts. Both emitted the expected
+fixed reason and attempt count through termination diagnostics, workspace status,
+and the creation caller without exposing synthetic raw-stderr canaries. Neither
+failure fixture started its daemon.
+
+After explicit suspension and removal of the injected fault, the same workspace
+became Ready on a new Pod using the unmodified workspace image. Its PVC UID and
+sentinel remained unchanged and a real Git checkout was verified. A second
+suspend/resume retained a dirty file and did not create a retry receipt, confirming
+that the checkout-ready marker skipped Git. No agent or prompt was created. Both
+owned test workspaces were initially suspended with their PVCs retained. After
+review of the evidence, controller-managed archive teardown completed for both;
+their workspace records, PVCs, projects and credential-free profiles were removed
+with UID preconditions and observed deletion. No user resources were changed.
+
+The first recovery probe used the initializer-only `/data` mount in the daemon
+and failed. Correcting the harness to use the daemon's actual workspace mount
+completed the checks on the same workspace/PVC; no product patch or repeated
+failure fixture was needed. The original failed harness report is retained alongside
+the successful recovery report. These tests establish Pod-wide retry fencing and
+retained recovery, not the cause or repair of the earlier environment DNS outage.
