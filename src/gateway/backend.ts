@@ -81,6 +81,14 @@ export class PaseoBackend implements Backend {
         ...hello.capabilities,
         owned_subscriptions: false,
         selective_agent_timeline: true,
+        // This backend transport forwards native event pushes to the desktop,
+        // but does not register explicit event subscriptions with the daemon.
+        // The SDK defaults would otherwise suppress provider catalog updates.
+        explicit_event_subscriptions: false,
+        // The gateway has no native content-hash cache for this connection.
+        // Forward ordinary full entries so a new desktop session can hydrate them.
+        compact_provider_snapshots: false,
+        provider_snapshot_references: false,
       },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
       transportFactory: (options) => {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { posix } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   decodeFileTransferFrame,
   decodeTerminalStreamFrame,
@@ -112,6 +113,8 @@ const providerRequests = new Set([
 export interface SessionOptions {
   checkoutRpcTimeoutMs?: number;
   projectRefRpcTimeoutMs?: number;
+  providerReadyTimeoutMs?: number;
+  providerReadyPollMs?: number;
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
   agentRouting?: AgentRouting;
@@ -168,6 +171,19 @@ export class GatewaySession {
   private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
   private readonly providerWatches = new Map<string, { projectUid: string; release: () => void }>();
+  private readonly providerReadinessWaits = new Map<string, Promise<Workspace>>();
+  private readonly providerInterests = new Map<
+    string,
+    {
+      workspaceUid: string;
+      projectUid: string;
+      projectSpec: string;
+      credentialProfile: string;
+      expiresAt: number;
+      publishing: boolean;
+    }
+  >();
+  private readonly closeController = new AbortController();
   private closed = false;
   private watchingWorkspaces = false;
   private refreshing = false;
@@ -191,6 +207,7 @@ export class GatewaySession {
   }
 
   private async connection(workspace: Workspace) {
+    if (this.closed) throw new Error("Gateway session closed");
     if (!authorizeWorkspace(this.options.principal ?? { kind: "owner" }, workspace))
       throw new Error("Workspace access denied");
     const id = workspace.metadata.name;
@@ -229,6 +246,8 @@ export class GatewaySession {
         if (this.closed || retired) return;
         if (message.type === "status" && message.payload.status === "server_info") return;
         if (message.type === "project.update") return;
+        // A native global/home catalog does not describe this workspace cwd.
+        if (message.type === "providers_snapshot_update" && !message.payload.cwd) return;
         if (message.type === "workspace_update") {
           // Backend removals never delete cluster records; only project this checkout's runtime.
           if (message.payload.kind === "upsert" && message.payload.workspace.id === localId) {
@@ -246,8 +265,34 @@ export class GatewaySession {
         }
         eventTail = enqueue(async () => {
           if (this.closed || retired) return;
+          if (message.type === "providers_snapshot_update") {
+            const records = await this.records();
+            const current = records.workspaces.find((row) => row.metadata.name === id);
+            const project = records.projects.find(
+              (row) => row.metadata.name === workspace.spec.projectRef,
+            );
+            if (
+              !current ||
+              current.metadata.uid !== workspace.metadata.uid ||
+              current.spec.residency !== "Running" ||
+              current.status?.phase !== "Ready" ||
+              current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+              !project ||
+              project.spec.credentialProfile !== workspace.spec.credentialProfile
+            )
+              return;
+          }
           const translated = object(await this.project(message, workspace, localId));
           if (this.closed || retired) return;
+          if (message.type === "providers_snapshot_update") {
+            const payload = object(translated.payload);
+            if (
+              typeof payload.cwd !== "string" ||
+              (payload.cwd !== workspacePath(id) &&
+                !payload.cwd.startsWith(`${workspacePath(id)}/`))
+            )
+              return;
+          }
           if (message.type === "agent_update") {
             const payload = object(translated.payload);
             payload.generation = this.options.directory.id;
@@ -350,6 +395,157 @@ export class GatewaySession {
         (w) => !w.metadata.deletionTimestamp && authorizeWorkspace(principal, w),
       ),
     };
+  }
+
+  /** Wait only for a caller-authorized, UID-bound workspace already being created. */
+  private async readyForProviderSnapshot(
+    selected: Workspace,
+    project: Project,
+  ): Promise<Workspace> {
+    const id = selected.metadata.name;
+    const uid = selected.metadata.uid;
+    if (!uid) throw new Error("Workspace UID is required for provider discovery");
+    const projectUid = project.metadata.uid;
+    if (!projectUid) throw new Error("Project UID is required for provider discovery");
+    // Healthy workspaces use the ordinary forwarding fence and never consume a
+    // slot reserved for cold Pods.
+    if (selected.status?.phase === "Ready") return selected;
+    const projectSpec = JSON.stringify(project.spec);
+    let interest = this.providerInterests.get(id);
+    if (interest && Date.now() >= interest.expiresAt) {
+      this.providerInterests.delete(id);
+      interest = undefined;
+    }
+    if (
+      interest &&
+      (interest.workspaceUid !== uid ||
+        interest.projectUid !== projectUid ||
+        interest.projectSpec !== projectSpec ||
+        interest.credentialProfile !== selected.spec.credentialProfile)
+    )
+      throw new Error("Workspace provider scope changed or access denied");
+    const existing = this.providerReadinessWaits.get(id);
+    if (existing) return existing;
+    if (this.providerReadinessWaits.size >= 4)
+      throw new Error("Too many pending workspace provider requests");
+    if (!interest) {
+      if (this.providerInterests.size >= 4)
+        throw new Error("Too many pending workspace provider interests");
+      this.providerInterests.set(id, {
+        workspaceUid: uid,
+        projectUid,
+        projectSpec,
+        credentialProfile: selected.spec.credentialProfile,
+        expiresAt: Date.now() + 5 * 60_000,
+        publishing: false,
+      });
+    }
+    const wait = (async () => {
+      const deadline = Date.now() + (this.options.providerReadyTimeoutMs ?? 25_000);
+      while (true) {
+        if (this.closed) throw new Error("Gateway session closed");
+        const records = await this.sessionBound(() => this.records());
+        const current = records.workspaces.find((row) => row.metadata.name === id);
+        const currentProject = records.projects.find(
+          (row) => row.metadata.name === selected.spec.projectRef,
+        );
+        if (this.closed) throw new Error("Gateway session closed");
+        if (
+          !current ||
+          current.metadata.uid !== uid ||
+          current.spec.projectRef !== selected.spec.projectRef ||
+          current.spec.credentialProfile !== selected.spec.credentialProfile ||
+          current.spec.residency !== "Running" ||
+          !currentProject ||
+          currentProject.metadata.uid !== projectUid ||
+          JSON.stringify(currentProject.spec) !== projectSpec
+        )
+          throw new Error("Workspace provider scope changed or access denied");
+        if (Date.now() >= deadline)
+          throw new Error("Workspace is still starting; retry provider discovery");
+        if (current.status?.phase === "Ready") return current;
+        if (current.status?.phase === "Failed")
+          throw new Error("Workspace failed before provider discovery");
+        await delay(this.options.providerReadyPollMs ?? 500, undefined, {
+          signal: this.closeController.signal,
+        });
+      }
+    })();
+    this.providerReadinessWaits.set(id, wait);
+    try {
+      return await wait;
+    } finally {
+      if (this.providerReadinessWaits.get(id) === wait) this.providerReadinessWaits.delete(id);
+    }
+  }
+
+  private async publishPendingProviderCatalog(
+    workspace: Workspace,
+    interest: NonNullable<ReturnType<typeof this.providerInterests.get>>,
+  ): Promise<void> {
+    try {
+      const connection = await this.connection(workspace);
+      if (this.closed) return;
+      const reply = await connection.backend.request({
+        type: "get_providers_snapshot_request",
+        requestId: randomUUID(),
+        cwd: workspacePath(workspace.metadata.name),
+      });
+      const records = await this.records();
+      const current = records.workspaces.find(
+        (row) => row.metadata.name === workspace.metadata.name,
+      );
+      const project = records.projects.find(
+        (row) => row.metadata.name === workspace.spec.projectRef,
+      );
+      if (Date.now() >= interest.expiresAt) {
+        if (this.providerInterests.get(workspace.metadata.name) === interest)
+          this.providerInterests.delete(workspace.metadata.name);
+        return;
+      }
+      if (
+        this.closed ||
+        this.providerInterests.get(workspace.metadata.name) !== interest ||
+        !current ||
+        current.metadata.uid !== interest.workspaceUid ||
+        current.spec.projectRef !== workspace.spec.projectRef ||
+        current.spec.residency !== "Running" ||
+        current.status?.phase !== "Ready" ||
+        current.spec.credentialProfile !== interest.credentialProfile ||
+        !project ||
+        project.metadata.uid !== interest.projectUid ||
+        JSON.stringify(project.spec) !== interest.projectSpec ||
+        reply.type !== "get_providers_snapshot_response"
+      )
+        return;
+      const payload = reply.payload;
+      if (payload.compactSnapshot || payload.notModified || payload.snapshotHash)
+        throw new Error("Workspace provider snapshot was not fully materialized");
+      this.options.emit({
+        type: "providers_snapshot_update",
+        payload: {
+          cwd: workspacePath(current.metadata.name),
+          entries: payload.entries,
+          generatedAt: payload.generatedAt,
+        },
+      });
+      if (!payload.entries.some((entry) => entry.status === "loading"))
+        this.providerInterests.delete(workspace.metadata.name);
+    } finally {
+      interest.publishing = false;
+    }
+  }
+
+  private async sessionBound<T>(run: () => Promise<T>): Promise<T> {
+    if (this.closed) throw new Error("Gateway session closed");
+    const work = run();
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(new Error("Gateway session closed"));
+      this.closeController.signal.addEventListener("abort", abort, { once: true });
+      work
+        .then(resolve, reject)
+        .finally(() => this.closeController.signal.removeEventListener("abort", abort));
+    });
   }
 
   private projectFor(workspace: Workspace, projects: Project[]) {
@@ -1153,11 +1349,11 @@ export class GatewaySession {
         }
         throw new Error("Project-scoped provider operation requires a workspace");
       }
-      const workspace =
+      const selected =
         typeof record.cwd === "string"
           ? selectWorkspace(record, active)
           : active.find((w) => w.status?.phase === "Ready");
-      if (!workspace) {
+      if (!selected) {
         if (message.type === "get_providers_snapshot_request") {
           this.options.emit({
             type: "get_providers_snapshot_response",
@@ -1174,6 +1370,11 @@ export class GatewaySession {
         }
         throw new Error("Create a workspace and wait for readiness before querying providers");
       }
+      const workspace =
+        typeof record.cwd === "string" && record.cwd.startsWith("/workspaces/")
+          ? await this.readyForProviderSnapshot(selected, this.projectFor(selected, projects))
+          : selected;
+      if (this.closed) return;
       await this.forward(message, workspace);
       return;
     }
@@ -1331,6 +1532,29 @@ export class GatewaySession {
           await connected.backend.close();
         }
       }
+      for (const [id, interest] of this.providerInterests) {
+        if (Date.now() >= interest.expiresAt) {
+          this.providerInterests.delete(id);
+          continue;
+        }
+        const workspace = active.find((row) => row.metadata.name === id);
+        const project = projects.find((row) => row.metadata.name === workspace?.spec.projectRef);
+        if (
+          !workspace ||
+          workspace.metadata.uid !== interest.workspaceUid ||
+          workspace.spec.credentialProfile !== interest.credentialProfile ||
+          !project ||
+          project.metadata.uid !== interest.projectUid ||
+          JSON.stringify(project.spec) !== interest.projectSpec ||
+          workspace.status?.phase === "Failed"
+        ) {
+          this.providerInterests.delete(id);
+          continue;
+        }
+        if (workspace.status?.phase !== "Ready" || interest.publishing) continue;
+        interest.publishing = true;
+        void this.publishPendingProviderCatalog(workspace, interest).catch(() => {});
+      }
       if (!this.watchingWorkspaces) return;
       const labels = await this.labels?.workspaceLabelsMany(active);
       for (const workspace of active) {
@@ -1389,6 +1613,8 @@ export class GatewaySession {
 
   async close() {
     this.closed = true;
+    this.closeController.abort();
+    this.providerInterests.clear();
     for (const watch of this.providerWatches.values()) watch.release();
     this.providerWatches.clear();
     this.labels?.releaseEmitter(this.options.emit);

@@ -238,6 +238,79 @@ try {
   const workspaces = await active.fetchWorkspaces();
   assert.equal(workspaces.entries.length, 2);
   await active.fetchAgents();
+  // The gateway's native connection must receive complete provider bodies that
+  // can be forwarded to a Desktop session without a backend hash cache.
+  const nativeProviderCwd = `/workspaces/one/provider-probe-${randomUUID().slice(0, 8)}`;
+  docker("exec", `${prefix}-one`, "mkdir", "-p", nativeProviderCwd);
+  let resolveNativeProviderUpdate!: (payload: {
+    cwd?: string;
+    entries: { status: string }[];
+    compactSnapshot?: unknown;
+    snapshotHash?: string;
+  }) => void;
+  const nativeProviderUpdate = new Promise<{
+    cwd?: string;
+    entries: { status: string }[];
+    compactSnapshot?: unknown;
+    snapshotHash?: string;
+  }>((resolve) => {
+    resolveNativeProviderUpdate = resolve;
+  });
+  const nativeProviderBackend = new PaseoBackend(
+    `ws://127.0.0.1:${ports.get("one")}/ws`,
+    password,
+    {
+      type: "hello",
+      clientId: randomUUID(),
+      clientType: "browser",
+      protocolVersion: 1,
+      capabilities: {
+        explicit_event_subscriptions: true,
+        compact_provider_snapshots: true,
+        provider_snapshot_references: true,
+      },
+    },
+    (message) => {
+      if (
+        message.type === "providers_snapshot_update" &&
+        message.payload.cwd === nativeProviderCwd &&
+        message.payload.entries.length > 0 &&
+        message.payload.entries.every((entry) => entry.status !== "loading")
+      )
+        resolveNativeProviderUpdate(message.payload);
+    },
+    () => {},
+    () => {},
+  );
+  try {
+    await nativeProviderBackend.connect();
+    const nativeCatalog = await nativeProviderBackend.request({
+      type: "get_providers_snapshot_request",
+      requestId: randomUUID(),
+      cwd: nativeProviderCwd,
+    });
+    assert.equal(nativeCatalog.type, "get_providers_snapshot_response");
+    if (nativeCatalog.type === "get_providers_snapshot_response") {
+      assert.ok(nativeCatalog.payload.entries.length > 0);
+      assert.equal(nativeCatalog.payload.compactSnapshot, undefined);
+      assert.equal(nativeCatalog.payload.snapshotHash, undefined);
+    }
+    const published = await Promise.race([
+      nativeProviderUpdate,
+      delay(30_000).then(() => {
+        throw new Error("Native provider update did not reach the gateway");
+      }),
+    ]);
+    assert.equal(published.cwd, nativeProviderCwd);
+    assert.ok(published.entries.length > 0);
+    assert.equal(published.compactSnapshot, undefined);
+    assert.equal(published.snapshotHash, undefined);
+  } finally {
+    await nativeProviderBackend.close();
+  }
+  console.log(
+    "PASS: unmodified daemon sends a resolved, full provider push for a fresh workspace cwd.",
+  );
   const terminals: string[] = [];
   for (const id of ["one", "two"]) {
     const file = await active.readFile(`/workspaces/${id}`, "marker.txt");

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import { PaseoBackend } from "../src/gateway/backend.js";
 
 const backends: PaseoBackend[] = [];
@@ -71,5 +72,57 @@ describe("backend request deadlines", () => {
     await result;
     expect(rejected).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledOnce();
+  });
+});
+
+describe("backend native hello", () => {
+  it("advertises legacy provider events and full snapshots even when the Desktop hello requests modern ownership", async () => {
+    const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("No socket address");
+      const hello = new Promise<Record<string, unknown>>((resolve) => {
+        server.once("connection", (socket) => {
+          socket.once("message", (data) => {
+            resolve(JSON.parse(data.toString()));
+            socket.close();
+          });
+        });
+      });
+      const connection = new PaseoBackend(
+        `ws://127.0.0.1:${address.port}/ws`,
+        "test-password",
+        {
+          type: "hello",
+          clientId: "desktop",
+          clientType: "browser",
+          protocolVersion: 1,
+          capabilities: {
+            owned_subscriptions: true,
+            selective_agent_timeline: false,
+            explicit_event_subscriptions: true,
+            compact_provider_snapshots: true,
+            provider_snapshot_references: true,
+          },
+        },
+        () => {},
+        () => {},
+        () => {},
+      );
+      backends.push(connection);
+      const connecting = connection.connect().catch(() => {});
+      const observed = await hello;
+      expect(observed.capabilities).toMatchObject({
+        owned_subscriptions: false,
+        selective_agent_timeline: true,
+        explicit_event_subscriptions: false,
+        compact_provider_snapshots: false,
+        provider_snapshot_references: false,
+      });
+      await connecting;
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
