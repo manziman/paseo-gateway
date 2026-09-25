@@ -525,8 +525,9 @@ this new-agent schedule check.
 The operator confirmed that a future-only existing-agent heartbeat displayed its
 correct available chat target, without a `Target gone` or `Agent unavailable`
 warning. The fixture had no runs and was created without sending an agent prompt.
-This passes the manual target-association check for #64. Cadence edit and deletion
-of this owned heartbeat remain pending.
+The operator also confirmed that changing its future cadence, saving, and deleting
+the heartbeat worked. This completes the manual existing-agent heartbeat check
+for #64 without dispatching a turn.
 
 This observation used the temporary memory-diagnostic gateway derived from the
 same deployed routing source as the file-link qualification above. The diagnostic
@@ -556,3 +557,19 @@ HTTP download, single-use handle, and cross-workspace isolation checks passed
 again. No agent prompt was resent. The simultaneous normal-image memory
 observation is affected by this storage-pressure interval and is being restarted
 as a fresh observation after recovery.
+
+## Scheduled run archive preference
+
+The `archiveOnFinish: false` live regression passed against the restored normal
+gateway image above. One future-only new-agent schedule was explicitly fired
+once; its successful output matched the test marker, and the workspace remained
+Running/Ready with a Ready Pod and a fetchable agent after completion. The test
+then deleted only its owned schedule, archived its owned workspace, observed
+controller teardown, and removed its CR and retained PVC with UID preconditions.
+Both deletions were observed. This qualifies the non-archiving schedule behavior
+in #74; the earlier manual schedule separately exercised `archiveOnFinish: true`.
+
+After the storage recovery, both user test agents were idle and their complete
+current timelines were readable, with 11 and 6 entries respectively, no page
+gaps, and their expected test replies. No same-agent pre-incident snapshot was
+available for an exact byte-for-byte history comparison. No prompt was resent.
