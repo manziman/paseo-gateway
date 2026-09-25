@@ -1,10 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
-import type { WSHelloMessage } from "@getpaseo/protocol/messages";
+import {
+  type CheckoutStatusResponse,
+  CheckoutStatusResponseSchema,
+  type WSHelloMessage,
+} from "@getpaseo/protocol/messages";
 import { expandProviderSnapshot } from "@getpaseo/protocol/provider-snapshot-codec";
 import { type RuntimeConfig, resourceName } from "../controller/resources.js";
-import { type CredentialProfile, type Project, type Workspace, workspacePath } from "../domain.js";
+import { validRepository } from "../credentials/repository.js";
+import {
+  type CredentialProfile,
+  type Project,
+  projectPath,
+  type Workspace,
+  workspacePath,
+} from "../domain.js";
 import type { Store } from "../kubernetes/store.js";
 import { statusCode } from "../kubernetes/store.js";
 import { type Backend, PaseoBackend } from "./backend.js";
@@ -21,6 +32,7 @@ const PROBE_HELLO: WSHelloMessage = {
 
 export interface ProviderProbeResult {
   entries: ProviderSnapshotEntry[];
+  checkoutStatus: CheckoutStatusResponse["payload"];
   fetchedAt: string;
 }
 
@@ -30,6 +42,41 @@ export interface ProviderProbeReceipts {
 }
 
 export class ProviderProbeCleanupError extends Error {}
+
+/** Preserve daemon Git facts, but never persist paths outside this disposable checkout. */
+export function publicCheckoutStatus(
+  payload: CheckoutStatusResponse["payload"],
+  checkoutCwd: string,
+  projectCwd: string,
+): CheckoutStatusResponse["payload"] {
+  if (payload.cwd !== checkoutCwd || payload.error)
+    throw new Error("Provider probe checkout status is unavailable");
+  const mapPath = (path: string | null | undefined): string | null | undefined => {
+    if (path === null || path === undefined) return path;
+    if (path !== checkoutCwd) throw new Error("Provider probe checkout path is outside its root");
+    return projectCwd;
+  };
+  if (payload.isPaseoOwnedWorktree)
+    throw new Error("Provider probe unexpectedly reported an owned worktree");
+  if (payload.remoteUrl) {
+    if (payload.remoteUrl.length > 4096)
+      throw new Error("Provider probe checkout remote URL exceeds its bounded size");
+    if (!validRepository(payload.remoteUrl))
+      throw new Error("Provider probe checkout remote URL is not a safe repository location");
+  }
+  const status = CheckoutStatusResponseSchema.parse({
+    type: "checkout_status_response",
+    payload: {
+      ...payload,
+      cwd: projectCwd,
+      repoRoot: mapPath(payload.repoRoot),
+      ...(payload.isGit ? { mainRepoRoot: mapPath(payload.mainRepoRoot) } : {}),
+    },
+  }).payload;
+  if (Buffer.byteLength(JSON.stringify(status)) > 16_384)
+    throw new Error("Provider probe checkout status exceeds its bounded size");
+  return status;
+}
 
 /** Never persist arbitrary provider errors, diagnostics, SVG or metadata. */
 export function publicProviderEntries(
@@ -200,6 +247,18 @@ export class ProviderProbe {
       });
       if (opened.type !== "open_project_response" || !opened.payload.workspace)
         throw new Error("Provider probe daemon registration failed");
+      const checkoutReply = await backend.request({
+        type: "checkout_status_request",
+        requestId: randomUUID(),
+        cwd,
+      });
+      if (checkoutReply.type !== "checkout_status_response")
+        throw new Error("Provider probe checkout response was invalid");
+      const checkoutStatus = publicCheckoutStatus(
+        checkoutReply.payload,
+        cwd,
+        projectPath(input.project.metadata.name),
+      );
       const refresh = await backend.request({
         type: "refresh_providers_snapshot_request",
         requestId: randomUUID(),
@@ -227,7 +286,7 @@ export class ProviderProbe {
           throw new Error("Provider catalog exceeds the bounded storage budget");
         if (entries.length > 0 && entries.every((entry) => entry.status !== "loading")) {
           await this.assertPodIdentity(name, projectUid, runId, receipts.podUid);
-          result = { entries, fetchedAt: new Date(this.now()).toISOString() };
+          result = { entries, checkoutStatus, fetchedAt: new Date(this.now()).toISOString() };
           break;
         }
         await this.wait(1500);

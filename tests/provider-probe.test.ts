@@ -3,7 +3,11 @@ import { compactProviderSnapshot } from "@getpaseo/protocol/provider-snapshot-co
 import { describe, expect, it } from "vitest";
 import { API_VERSION, type CredentialProfile } from "../src/domain.js";
 import { workspaceDescriptor } from "../src/gateway/catalog.js";
-import { ProviderProbe, publicProviderEntries } from "../src/gateway/provider-probe.js";
+import {
+  ProviderProbe,
+  publicCheckoutStatus,
+  publicProviderEntries,
+} from "../src/gateway/provider-probe.js";
 import { MemoryStore, project, workspace } from "./fixtures.js";
 
 function input() {
@@ -65,6 +69,27 @@ describe("provider probe", () => {
                 type: "refresh_providers_snapshot_response",
                 payload: { requestId: message.requestId, acknowledged: true },
               });
+            if (message.type === "checkout_status_request")
+              return SessionOutboundMessageSchema.parse({
+                type: "checkout_status_response",
+                payload: {
+                  cwd: message.cwd,
+                  requestId: message.requestId,
+                  error: null,
+                  isGit: true,
+                  isPaseoOwnedWorktree: false,
+                  repoRoot: message.cwd,
+                  mainRepoRoot: null,
+                  currentBranch: "main",
+                  isDirty: false,
+                  baseRef: null,
+                  aheadBehind: null,
+                  aheadOfOrigin: null,
+                  behindOfOrigin: null,
+                  hasRemote: false,
+                  remoteUrl: null,
+                },
+              });
             if (message.type !== "get_providers_snapshot_request")
               throw new Error("Unexpected probe request");
             return SessionOutboundMessageSchema.parse({
@@ -106,13 +131,113 @@ describe("provider probe", () => {
       { provider: "claude", status: "ready", models: [{ id: "model", label: "Model" }] },
     ]);
     expect(JSON.stringify(result)).not.toContain("secret");
+    expect(result.checkoutStatus).toMatchObject({
+      cwd: "/projects/example",
+      repoRoot: "/projects/example",
+      currentBranch: "main",
+      isGit: true,
+      isDirty: false,
+    });
     expect(requests).toEqual([
       "open_project_request",
+      "checkout_status_request",
       "refresh_providers_snapshot_request",
       "get_providers_snapshot_request",
     ]);
     expect([...store.objects.keys()]).toEqual([]);
     expect(store.deletions).toHaveLength(2);
+  });
+
+  it("rejects a daemon checkout path outside the owned disposable root", () => {
+    expect(() =>
+      publicCheckoutStatus(
+        {
+          cwd: "/workspaces/catalog-id",
+          requestId: "status",
+          error: null,
+          isGit: true,
+          isPaseoOwnedWorktree: false,
+          repoRoot: "/other/checkout",
+          mainRepoRoot: null,
+          currentBranch: "main",
+          isDirty: false,
+          baseRef: null,
+          aheadBehind: null,
+          aheadOfOrigin: null,
+          behindOfOrigin: null,
+          hasRemote: false,
+          remoteUrl: null,
+        },
+        "/workspaces/catalog-id",
+        "/projects/example",
+      ),
+    ).toThrow("outside its root");
+  });
+
+  it("rejects embedded remote URL credentials before persisting status", () => {
+    expect(() =>
+      publicCheckoutStatus(
+        {
+          cwd: "/workspaces/catalog-id",
+          requestId: "status",
+          error: null,
+          isGit: true,
+          isPaseoOwnedWorktree: false,
+          repoRoot: "/workspaces/catalog-id",
+          mainRepoRoot: null,
+          currentBranch: "main",
+          isDirty: false,
+          baseRef: null,
+          aheadBehind: null,
+          aheadOfOrigin: null,
+          behindOfOrigin: null,
+          hasRemote: true,
+          remoteUrl: "https://token@example.invalid/repo.git",
+        },
+        "/workspaces/catalog-id",
+        "/projects/example",
+      ),
+    ).toThrow("not a safe repository location");
+  });
+
+  it("preserves both supported credential-free SSH remote forms", () => {
+    const native = {
+      cwd: "/workspaces/catalog-id",
+      requestId: "status",
+      error: null,
+      isGit: true,
+      isPaseoOwnedWorktree: false,
+      repoRoot: "/workspaces/catalog-id",
+      mainRepoRoot: null,
+      currentBranch: "main",
+      isDirty: false,
+      baseRef: null,
+      aheadBehind: null,
+      aheadOfOrigin: null,
+      behindOfOrigin: null,
+      hasRemote: true,
+      remoteUrl: "ssh://git@example.invalid/repo.git",
+    } as const;
+    for (const remoteUrl of [native.remoteUrl, "git@example.invalid:repo.git"])
+      expect(
+        publicCheckoutStatus(
+          { ...native, remoteUrl },
+          "/workspaces/catalog-id",
+          "/projects/example",
+        ),
+      ).toMatchObject({ remoteUrl, repoRoot: "/projects/example" });
+    for (const remoteUrl of [
+      "https://example.invalid/repo.git?token=fake",
+      "https://example.invalid/repo.git#fake",
+      "user@example.invalid:repo.git",
+    ])
+      expect(() =>
+        publicCheckoutStatus(
+          { ...native, remoteUrl },
+          "/workspaces/catalog-id",
+          "/projects/example",
+        ),
+      ).toThrow("not a safe repository location");
   });
 
   it("replaces arbitrary provider error text with a fixed category", () => {

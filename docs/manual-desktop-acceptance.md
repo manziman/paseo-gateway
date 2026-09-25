@@ -27,8 +27,11 @@ fresh fixture with the sidebar's **New workspace (+)**, select the intended
 and submit the test prompt. Use the project's displayed name; it can differ from
 its internal ID. For the cold-start check, first use a fresh desktop preference
 state with **zero Ready workspaces** (existing fixtures may remain Suspended).
-The provider/model picker must populate for the selected project, and that
-initial prompted Chat submission must create the first workspace and agent.
+The provider/model picker and source checkout status must populate for the
+selected project, and that initial prompted Chat submission must create the
+first workspace and agent. Repeat with saved worktree isolation: a detached
+source revision may truthfully have no current branch, yet submission should
+use the Project's configured revision without inventing a branch-off request.
 Record the time to discover providers, a bounded diagnostic error if it fails,
 and whether retry works. A saved provider preference or a previously Ready
 workspace invalidates this cold-start check. It is tracked in

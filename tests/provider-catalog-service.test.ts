@@ -1,4 +1,5 @@
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
+import type { CheckoutStatusResponse } from "@getpaseo/protocol/messages";
 import { describe, expect, it } from "vitest";
 import { API_VERSION } from "../src/domain.js";
 import { ProviderCatalog } from "../src/gateway/provider-catalog-service.js";
@@ -34,6 +35,22 @@ const ready: ProviderSnapshotEntry[] = [
     models: [{ provider: "claude", id: "model", label: "Model" }],
   },
 ];
+const checkoutStatus: CheckoutStatusResponse["payload"] = {
+  cwd: "/projects/example",
+  requestId: "probe-checkout",
+  error: null,
+  isGit: false,
+  isPaseoOwnedWorktree: false,
+  repoRoot: null,
+  currentBranch: null,
+  isDirty: null,
+  baseRef: null,
+  aheadBehind: null,
+  aheadOfOrigin: null,
+  behindOfOrigin: null,
+  hasRemote: false,
+  remoteUrl: null,
+};
 function setup() {
   const store = new CatalogStore();
   const configuredProject = store.projectRows[0];
@@ -62,6 +79,7 @@ function setup() {
       imagePullPolicy: "IfNotPresent",
     },
     now: () => now,
+    checkoutWaitMs: 2_000,
     probe: {
       async run({ runId, onResourceCreated }) {
         if (!runId) throw new Error("Test run ID is unavailable");
@@ -94,10 +112,12 @@ function setup() {
   };
 }
 
-async function settled(predicate: () => boolean) {
-  for (let i = 0; i < 50 && !predicate(); i++)
+async function settled(predicate: () => boolean | Promise<boolean>) {
+  for (let i = 0; i < 50; i++) {
+    if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(predicate()).toBe(true);
+  }
+  expect(await predicate()).toBe(true);
 }
 
 describe("durable cold provider catalog", () => {
@@ -110,7 +130,11 @@ describe("durable cold provider catalog", () => {
     expect(await fixture.catalog.snapshot(row)).toEqual([]);
     await settled(() => fixture.completions.length === 1);
     expect(await fixture.catalog.snapshot(row)).toEqual([]);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await settled(() => updates.length === 1);
     expect(updates).toEqual([ready]);
     expect(await fixture.catalog.snapshot(row)).toEqual(ready);
@@ -214,7 +238,11 @@ describe("durable cold provider catalog", () => {
     await settled(() => fixture.completions.length === 2);
     expect(await fixture.store.record("provider-catalog", "three")).toBeUndefined();
     fixture.advance(6 * 60_000 + 1);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await settled(() => fixture.completions.length === 3);
     const third = await fixture.store.record<{ state: string; startedAt: string }>(
       "provider-catalog",
@@ -230,13 +258,100 @@ describe("durable cold provider catalog", () => {
     row.metadata.uid = "project-uid";
     expect(await fixture.catalog.snapshot(row)).toEqual([]);
     await settled(() => fixture.completions.length === 1);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await settled(() => fixture.calls.length === 1);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await fixture.catalog.snapshot(row)).toEqual(ready);
     expect(await fixture.catalog.snapshot(row, true)).toEqual([]);
     await settled(() => fixture.completions.length === 2);
     expect(fixture.calls).toHaveLength(2);
+  });
+
+  it("waits for the same disposable probe and caches its checkout facts", async () => {
+    const fixture = setup();
+    const row = project();
+    row.metadata.uid = "project-uid";
+    const waiting = fixture.catalog.checkoutStatus(row);
+    await settled(() => fixture.completions.length === 1);
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
+    expect(await waiting).toEqual(checkoutStatus);
+    expect(await fixture.catalog.checkoutStatus(row)).toEqual(checkoutStatus);
+    expect(fixture.calls).toHaveLength(1);
+  });
+
+  it("reprobes old verified records with no checkout status instead of fabricating Git facts", async () => {
+    const fixture = setup();
+    const row = project();
+    row.metadata.uid = "project-uid";
+    expect(await fixture.catalog.snapshot(row)).toEqual([]);
+    await settled(() => fixture.completions.length === 1);
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
+    await settled(
+      async () =>
+        (await fixture.store.record<{ state: string }>("provider-catalog", "example"))?.value
+          .state === "verified",
+    );
+    const previous = await fixture.store.record<{
+      state: string;
+      fingerprint: string;
+      entries: ProviderSnapshotEntry[];
+      checkoutStatus?: CheckoutStatusResponse["payload"];
+      fetchedAt: string;
+      expiresAt: string;
+    }>("provider-catalog", "example");
+    if (!previous) throw new Error("Expected verified record");
+    const { checkoutStatus: _discard, ...oldValue } = previous.value;
+    await fixture.store.updateRecord({ ...previous, value: oldValue });
+    const waiting = fixture.catalog.checkoutStatus(row);
+    await settled(() => fixture.completions.length === 2);
+    fixture.completions[1]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
+    expect(await waiting).toEqual(checkoutStatus);
+    expect(fixture.calls).toHaveLength(2);
+  });
+
+  it("waits past an obsolete record while a changed profile starts a new probe", async () => {
+    const fixture = setup();
+    const row = project();
+    row.metadata.uid = "project-uid";
+    expect(await fixture.catalog.snapshot(row)).toEqual([]);
+    await settled(() => fixture.completions.length === 1);
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
+    await settled(
+      async () =>
+        (await fixture.store.record<{ state: string }>("provider-catalog", "example"))?.value
+          .state === "verified",
+    );
+    const profile = fixture.store.profileRows.get("claude-default");
+    if (!profile) throw new Error("Test profile is unavailable");
+    profile.spec.runtime = { image: "runtime:v2" };
+    const waiting = fixture.catalog.checkoutStatus(row);
+    await settled(() => fixture.completions.length === 2);
+    fixture.completions[1]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
+    expect(await waiting).toEqual(checkoutStatus);
   });
 
   it("publishes a fixed error row for a provider verified under the same configuration", async () => {
@@ -247,7 +362,11 @@ describe("durable cold provider catalog", () => {
     const release = fixture.catalog.watch("example", (entries) => updates.push(entries));
     expect(await fixture.catalog.snapshot(row)).toEqual([]);
     await settled(() => fixture.completions.length === 1);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await settled(() => updates.some((entries) => entries[0]?.status === "ready"));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(await fixture.catalog.snapshot(row, true)).toEqual([]);
@@ -292,7 +411,11 @@ describe("durable cold provider catalog", () => {
     const updates: ProviderSnapshotEntry[][] = [];
     const release = replacement.watch("example", (entries) => updates.push(entries));
     expect(await replacement.snapshot(row)).toEqual([]);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await settled(() => updates.some((entries) => entries[0]?.status === "ready"));
     expect(await replacement.snapshot(row)).toEqual(ready);
     release();
@@ -304,7 +427,11 @@ describe("durable cold provider catalog", () => {
     row.metadata.uid = "project-uid";
     expect(await fixture.catalog.snapshot(row)).toEqual([]);
     await settled(() => fixture.completions.length === 1);
-    fixture.completions[0]?.({ entries: ready, fetchedAt: new Date(fixture.now).toISOString() });
+    fixture.completions[0]?.({
+      entries: ready,
+      checkoutStatus,
+      fetchedAt: new Date(fixture.now).toISOString(),
+    });
     await new Promise((resolve) => setTimeout(resolve, 0));
     let reprobes = 0;
     const auditor = new ProviderCatalog({
@@ -324,7 +451,7 @@ describe("durable cold provider catalog", () => {
       probe: {
         async run() {
           reprobes++;
-          return { entries: ready, fetchedAt: new Date(fixture.now).toISOString() };
+          return { entries: ready, checkoutStatus, fetchedAt: new Date(fixture.now).toISOString() };
         },
         async cleanup() {},
       },

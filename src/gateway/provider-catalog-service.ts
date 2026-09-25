@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
+import type { CheckoutStatusResponse } from "@getpaseo/protocol/messages";
 import type { RuntimeConfig } from "../controller/resources.js";
 import { referencedCredentials } from "../credentials/projection.js";
 import type { CredentialProfile, Project } from "../domain.js";
@@ -20,6 +22,9 @@ const RETRY_DELAY_MS = 30_000;
 const MAX_PENDING = 32;
 const MAX_CONCURRENT = 2;
 const STALE_AFTER_MS = 6 * 60_000;
+// The pinned SDK times out an RPC after about 55 seconds. Leave time to
+// deliver a sanitized error instead of leaving Desktop's query pending.
+const CHECKOUT_WAIT_MS = 45_000;
 
 type KnownProvider = Pick<ProviderSnapshotEntry, "provider" | "label">;
 function knownProviders(entries: readonly ProviderSnapshotEntry[]): KnownProvider[] {
@@ -53,6 +58,8 @@ type CatalogRecord =
       state: "verified";
       fingerprint: string;
       entries: ProviderSnapshotEntry[];
+      /** Optional only for durable records written before checkout probing existed. */
+      checkoutStatus?: CheckoutStatusResponse["payload"];
       fetchedAt: string;
       expiresAt: string;
     }
@@ -82,6 +89,7 @@ export interface ProviderCatalogOptions {
   probe?: Pick<ProviderProbe, "run" | "cleanup">;
   pollMs?: number;
   configAuditMs?: number;
+  checkoutWaitMs?: number;
 }
 
 function stable(value: unknown): unknown {
@@ -308,6 +316,57 @@ export class ProviderCatalog {
     return [];
   }
 
+  /** Return only the native status of this exact project's disposable checkout. */
+  async checkoutStatus(project: Project): Promise<CheckoutStatusResponse["payload"]> {
+    let identity: CatalogIdentity;
+    try {
+      identity = await this.identity(project);
+    } catch {
+      throw new Error("Project checkout discovery configuration is unavailable");
+    }
+    const projectId = project.metadata.name;
+    let record = await this.options.store.record<CatalogRecord>(RECORD_KIND, projectId);
+    const obsoleteVersion =
+      record && record.value.fingerprint !== identity.fingerprint ? record.version : undefined;
+    const matching = () => record?.value.fingerprint === identity.fingerprint;
+    const available = (): CheckoutStatusResponse["payload"] | undefined => {
+      if (
+        matching() &&
+        record?.value.state === "verified" &&
+        Date.parse(record.value.expiresAt) > this.now()
+      )
+        return record.value.checkoutStatus;
+      return undefined;
+    };
+    const cached = available();
+    if (cached) return cached;
+    if (
+      matching() &&
+      record?.value.state === "failed" &&
+      Date.parse(record.value.retryAt) > this.now()
+    )
+      throw new Error("Project checkout discovery failed; retry after the bounded backoff");
+
+    // A verified record from the previous release has no checkout status.
+    // Reprobe instead of inventing Git facts or borrowing another workspace.
+    await this.snapshot(project, matching() && record?.value.state === "verified");
+    const deadline = Date.now() + (this.options.checkoutWaitMs ?? CHECKOUT_WAIT_MS);
+    while (Date.now() < deadline) {
+      record = await this.options.store.record<CatalogRecord>(RECORD_KIND, projectId);
+      const completed = available();
+      if (completed) return completed;
+      if (matching() && record?.value.state === "failed")
+        throw new Error("Project checkout discovery failed; retry after the bounded backoff");
+      // A previous fingerprint can remain durable for a moment while the
+      // newly admitted run claims the record. Only a different, newer record
+      // means this request's configuration was superseded.
+      if (record && !matching() && record.version !== obsoleteVersion)
+        throw new Error("Project checkout discovery configuration changed");
+      await delay(300);
+    }
+    throw new Error("Project checkout discovery is still running; retry shortly");
+  }
+
   private async reclaimExpired(
     id: string,
     run: Extract<CatalogRecord, { state: "probing" }>,
@@ -434,6 +493,7 @@ export class ProviderCatalog {
           state: "verified",
           fingerprint: identity.fingerprint,
           entries: result.entries,
+          checkoutStatus: result.checkoutStatus,
           fetchedAt: result.fetchedAt,
           expiresAt: new Date(this.now() + VERIFIED_TTL_MS).toISOString(),
         },

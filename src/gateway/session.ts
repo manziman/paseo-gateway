@@ -108,6 +108,7 @@ const providerRequests = new Set([
 ]);
 
 export interface SessionOptions {
+  checkoutRpcTimeoutMs?: number;
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
   agentRouting?: AgentRouting;
@@ -129,7 +130,7 @@ export interface SessionOptions {
   namespace: string;
   backendPassword: string;
   backendSecure?: boolean;
-  providerCatalog?: Pick<ProviderCatalog, "snapshot" | "watch"> & {
+  providerCatalog?: Pick<ProviderCatalog, "snapshot" | "watch" | "checkoutStatus"> & {
     identity(project: Project): Promise<{ fingerprint: string }>;
   };
   directory: DirectoryGeneration;
@@ -392,12 +393,58 @@ export class GatewaySession {
     return entries;
   }
 
+  private async scopedCheckoutStatus(
+    catalog: Pick<ProviderCatalog, "checkoutStatus"> & {
+      identity(project: Project): Promise<{ fingerprint: string }>;
+    },
+    project: Project,
+  ) {
+    const originalFingerprint = (await catalog.identity(project)).fingerprint;
+    const status = await catalog.checkoutStatus(project);
+    const current = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (!current || current.metadata.uid !== project.metadata.uid)
+      throw new Error("Project checkout access changed");
+    if ((await catalog.identity(current)).fingerprint !== originalFingerprint)
+      throw new Error("Project checkout configuration changed");
+    const finalProject = projectForCatalogPath(
+      projectPath(project.metadata.name),
+      (await this.records()).projects,
+    );
+    if (
+      !finalProject ||
+      finalProject.metadata.uid !== current.metadata.uid ||
+      JSON.stringify(finalProject.spec) !== JSON.stringify(current.spec)
+    )
+      throw new Error("Project checkout access or configuration changed");
+    return status;
+  }
+
   async handle(message: SessionInboundMessage) {
     if (this.closed) return;
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : undefined;
+    const projectCheckout =
+      message.type === "checkout_status_request" && message.cwd.startsWith("/projects/");
+    const checkoutDeadline = projectCheckout
+      ? Date.now() + (this.options.checkoutRpcTimeoutMs ?? 45_000)
+      : undefined;
+    let checkoutTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await this.dispatch(message);
+      const work = this.dispatch(message, checkoutDeadline);
+      if (checkoutDeadline === undefined) await work;
+      else
+        await Promise.race([
+          work,
+          new Promise<never>((_resolve, reject) => {
+            checkoutTimer = setTimeout(
+              () => reject(new Error("Project checkout discovery timed out; retry shortly")),
+              Math.max(1, checkoutDeadline - Date.now()),
+            );
+          }),
+        ]);
     } catch (error) {
       if (!this.closed && requestId)
         this.options.emit({
@@ -409,10 +456,12 @@ export class GatewaySession {
             error: error instanceof Error ? error.message : "Gateway operation failed",
           },
         });
+    } finally {
+      if (checkoutTimer) clearTimeout(checkoutTimer);
     }
   }
 
-  private async dispatch(message: SessionInboundMessage) {
+  private async dispatch(message: SessionInboundMessage, checkoutDeadline?: number) {
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : "";
     const { projects, workspaces } = await this.records();
@@ -939,6 +988,27 @@ export class GatewaySession {
     if (message.type === "create_agent_request" || message.type === "agent.create.request") {
       if (message.worktree || message.worktreeName || message.git)
         throw new Error("Create workspaces through the cluster workspace operation first");
+    }
+    if (message.type === "checkout_status_request" && message.cwd.startsWith("/projects/")) {
+      const project = projectForCatalogPath(message.cwd, projects);
+      if (!project) throw new Error("Project checkout is not authorized or configured");
+      const catalog = this.options.providerCatalog;
+      if (!catalog) throw new Error("Project checkout discovery is unavailable");
+      const status = await this.scopedCheckoutStatus(catalog, project);
+      // A timed-out checkout RPC is not allowed to emit a late success. The
+      // shared catalog probe continues and can satisfy a subsequent request.
+      if (checkoutDeadline !== undefined && Date.now() >= checkoutDeadline)
+        throw new Error("Project checkout discovery timed out; retry shortly");
+      if (this.closed) return;
+      this.options.emit({
+        type: "checkout_status_response",
+        payload: {
+          ...status,
+          cwd: projectPath(project.metadata.name),
+          requestId: message.requestId,
+        },
+      });
+      return;
     }
     if (providerRequests.has(message.type)) {
       if (typeof record.cwd === "string" && record.cwd.startsWith("/projects/")) {

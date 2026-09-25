@@ -35,7 +35,7 @@ class ReadyStore extends MemoryStore {
 let createdContainer = false;
 try {
   for (const volume of volumes) docker("volume", "create", volume);
-  const setup = `mkdir -p /home/paseo/.paseo /workspaces/${workspaceId}; printf '%s' '{"daemon":{"mcp":{"enabled":false,"injectIntoAgents":false},"relay":{"enabled":false}}}' > /home/paseo/.paseo/config.json; chown -R 1000:1000 /home/paseo /workspaces/${workspaceId}; exec /usr/local/bin/paseo-workspace-entrypoint`;
+  const setup = `mkdir -p /home/paseo/.paseo /workspaces/${workspaceId}; printf '%s' '{"daemon":{"mcp":{"enabled":false,"injectIntoAgents":false},"relay":{"enabled":false}}}' > /home/paseo/.paseo/config.json; git -C /workspaces/${workspaceId} init --initial-branch=main >/dev/null; printf '%s' 'fixture\n' > /workspaces/${workspaceId}/README.md; git -C /workspaces/${workspaceId} add README.md; git -C /workspaces/${workspaceId} -c user.name=Fixture -c user.email=fixture@example.invalid commit -m fixture >/dev/null; chown -R 1000:1000 /home/paseo /workspaces/${workspaceId}; exec /usr/local/bin/paseo-workspace-entrypoint`;
   docker(
     "run",
     "--detach",
@@ -161,12 +161,23 @@ try {
   const result = await probe.run({ project: selectedProject, profile, runId });
   assert.ok(result.entries.length > 0);
   assert.ok(result.entries.every((entry) => entry.status !== "loading"));
+  assert.equal(result.checkoutStatus.cwd, "/projects/example");
+  assert.equal(result.checkoutStatus.isGit, true);
+  assert.equal(result.checkoutStatus.repoRoot, "/projects/example");
+  assert.equal(result.checkoutStatus.currentBranch, "main");
+  assert.equal(result.checkoutStatus.isDirty, false);
   assert.equal(store.objects.size, 0, "Probe-owned fake resources must be cleaned up");
   console.log(
     JSON.stringify({
       result: "PASS",
       wire: "pinned Paseo daemon via PaseoBackend",
       scope: "credential-free Docker",
+      checkout: {
+        isGit: result.checkoutStatus.isGit,
+        logicalPaths: result.checkoutStatus.repoRoot === result.checkoutStatus.cwd,
+        branchPresent: !!result.checkoutStatus.currentBranch,
+        isDirty: result.checkoutStatus.isDirty,
+      },
       providers: result.entries.map((entry) => ({
         status: entry.status,
         modelCount: entry.models?.length ?? 0,

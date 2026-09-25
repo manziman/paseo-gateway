@@ -192,6 +192,21 @@ describe("cluster workspace lifecycle", () => {
     ).toBe(42);
   });
 
+  it("uses the configured source revision for detached worktree creation without a checkout request", async () => {
+    const { service, store } = setup();
+    const configured = store.projectRows[0];
+    if (!configured) throw new Error("Test project is unavailable");
+    configured.spec.revision = "release-tag";
+    const created = await service.createWorkspace({
+      type: "workspace.create.request",
+      requestId: "detached-source",
+      idempotencyKey: "detached-source",
+      source: { kind: "worktree", cwd: "/projects/example", projectId: "example" },
+    });
+    expect(created.workspace.spec).toMatchObject({ revision: "release-tag", fetchDepth: 0 });
+    expect(created.workspace.spec.branch).toBeUndefined();
+  });
+
   it("waits for readiness and reports failed scheduling before attempting a provider mutation", async () => {
     const { store, service, requests } = setup();
     const row = workspace();
