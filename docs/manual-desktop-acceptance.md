@@ -26,7 +26,9 @@ switching between them. After the local connection helpers were restored, the
 operator confirmed a connected host and both histories intact following app
 quit/reopen. Terminals in both test workspaces also displayed their own distinct
 markers correctly when switching between them. A text file uploaded through the
-desktop attachment control was read by the agent with matching contents. These
+desktop attachment control was read by the agent with matching contents. After
+the #73 routing fix, the operator also opened an agent-generated file through
+its chat link and confirmed the contents matched. These
 results do not complete the remaining checklist or the fresh-preference,
 zero-Ready cold-start scenario.
 

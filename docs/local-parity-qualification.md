@@ -492,5 +492,7 @@ The original live reproduction now resolves the existing file in its workspace,
 returns no match from the second workspace, and reads matching bytes. HTTP
 download also returns matching contents and reuse of the consumed handle is
 rejected. Neither prompt nor file was recreated. Both existing workspace Pod
-UIDs and restart counts were unchanged by the gateway-only rollout. Manual
-confirmation that clicking the existing link opens the file remains pending.
+UIDs and restart counts were unchanged by the gateway-only rollout. The operator
+subsequently confirmed that clicking the existing Desktop file link opens the
+file with matching contents. This completes the manual file-link opening check;
+the HTTP download observation above remains separately automated evidence.
