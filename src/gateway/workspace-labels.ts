@@ -76,6 +76,17 @@ export class WorkspaceLabels {
     return this.labelsFor((await this.read()).state, workspace);
   }
 
+  /** Use one authoritative catalog version for one already-authorized directory read. */
+  async workspaceLabelsMany(
+    workspaces: readonly Workspace[],
+  ): Promise<ReadonlyMap<string, string[]>> {
+    if (!workspaces.length) return new Map();
+    const { state } = await this.read();
+    return new Map(
+      workspaces.map((workspace) => [workspace.metadata.name, this.labelsFor(state, workspace)]),
+    );
+  }
+
   private visible(state: CatalogState, principal: GatewayPrincipal, workspaces: Workspace[]) {
     return principal.kind === "owner"
       ? state.labels

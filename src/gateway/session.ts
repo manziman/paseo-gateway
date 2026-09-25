@@ -625,23 +625,21 @@ export class GatewaySession {
           .filter((w) => w.spec.residency === "Running" && w.status?.phase === "Ready")
           .map((w) => this.connection(w)),
       );
-      let rows = await Promise.all(
-        active
-          .filter(
-            (w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId,
-          )
-          .map(async (w) => ({
-            ...workspaceDescriptor(
-              w,
-              this.projectFor(w, projects),
-              w.spec.residency === "Running" && w.status?.phase === "Ready"
-                ? this.workspaceRuntime.get(w.metadata.name)
-                : undefined,
-            ),
-            labels: (await this.labels?.workspaceLabels(w)) ?? [],
-            syncSeq: this.options.directory.next(),
-          })),
+      const visible = active.filter(
+        (w) => !message.filter?.projectId || w.spec.projectRef === message.filter.projectId,
       );
+      const labels = await this.labels?.workspaceLabelsMany(visible);
+      let rows = visible.map((w) => ({
+        ...workspaceDescriptor(
+          w,
+          this.projectFor(w, projects),
+          w.spec.residency === "Running" && w.status?.phase === "Ready"
+            ? this.workspaceRuntime.get(w.metadata.name)
+            : undefined,
+        ),
+        labels: labels?.get(w.metadata.name) ?? [],
+        syncSeq: this.options.directory.next(),
+      }));
       if (message.filter?.query) {
         const q = message.filter.query.toLowerCase();
         rows = rows.filter(
@@ -1334,6 +1332,7 @@ export class GatewaySession {
         }
       }
       if (!this.watchingWorkspaces) return;
+      const labels = await this.labels?.workspaceLabelsMany(active);
       for (const workspace of active) {
         if (workspace.spec.residency === "Running" && workspace.status?.phase === "Ready")
           await this.connection(workspace);
@@ -1344,7 +1343,7 @@ export class GatewaySession {
             ? this.workspaceRuntime.get(workspace.metadata.name)
             : undefined,
         );
-        descriptor.labels = (await this.labels?.workspaceLabels(workspace)) ?? [];
+        descriptor.labels = labels?.get(workspace.metadata.name) ?? [];
         const serialized = JSON.stringify(descriptor);
         if (this.workspaceProjections.get(workspace.metadata.name) === serialized) continue;
         this.workspaceProjections.set(workspace.metadata.name, serialized);
