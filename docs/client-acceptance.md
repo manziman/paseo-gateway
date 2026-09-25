@@ -61,7 +61,7 @@ flows across at least two isolated Pods and verify no cross-workspace routing.
 | `desktop.git-file` | Branch/PR checkout, list/read/write file, attachment upload and download | Correct Pod and workspace identity, binary integrity; provider-free Docker transfer evidence in `scripts/upstream-test.ts`, desktop observation still required |
 | `desktop.terminal` | Open/read/write/close terminal on two Pods, replace gateway, reconnect | Terminal slot identity, output order, no cross-Pod bytes |
 | `desktop.schedule` | In the exposed Schedules screen, create/list/edit/pause/resume/run now/delete a new-agent schedule | Cadence/status/last-run display and exactly one created agent turn; run logs are CLI/SDK evidence |
-| `desktop.existing-agent-schedule` | With an operator-created existing-agent heartbeat on a Ready test agent, inspect its target label/status, edit its cron cadence, and delete it | The correct agent is shown as present; a false “Target gone” or “Agent unavailable” is FAIL. This remains an unresolved scoped-ID desktop parity gate. |
+| `desktop.existing-agent-schedule` | With an operator-created existing-agent heartbeat on a Ready test agent, inspect its target label/status, edit its cron cadence, and delete it | The correct agent is shown as present; a false “Target gone” or “Agent unavailable” is FAIL. Target display, cadence edit and deletion passed in Desktop 0.9.2 on 2026-09-25; see the [local evidence](local-parity-qualification.md#desktop-existing-agent-heartbeat-target). |
 | `sdk.directory` | Page beyond 200; filter; archived/suspended; inspect `lastError` | Full records, no duplicates/omissions, explicit unavailable state |
 | `sdk.reconnect` | Replace gateway and receive new full directory generation | All existing workspaces/agents visible after reconnect |
 | `sdk.ambiguous` | Drop response after create/prompt/file mutation, reconnect and inspect | No silent replay; unknown outcome reported where needed |
@@ -77,9 +77,12 @@ reference when a scenario has passed. The script prints only IDs and status.
 schedule or CLI/SDK evidence cannot satisfy it. The pinned 0.9.1 desktop joins
 schedule targets to directory agents by exact ID in
 [schedule derivation](https://github.com/getpaseo/paseo/blob/v0.9.1/packages/app/src/schedules/schedule-derivation.ts),
-while the gateway exposes reversible workspace-scoped agent IDs and the pinned
-schedule target schema requires a GUID. The installed 0.9.2 desktop bundle retains
-the same exact-ID lookup. This is a source-level finding pending manual UI evidence.
+and the pinned schedule target schema requires a GUID. The installed 0.9.2
+desktop bundle retains the same exact-ID lookup. The gateway now uses
+[durable GUID projection](guid-agent-identity-plan.md), with registered legacy
+scoped IDs accepted through the compatibility path. The operator confirmed the
+correct target display, cadence edit and deletion in Desktop 0.9.2; this does
+not substitute for the separate scheduled-dispatch and recovery checks.
 
 Optional voice/plugins, host filesystem browsing, Hub/relay, host
 recycle/password/reboot operations, and active-active HA are not release gates
