@@ -25,6 +25,8 @@ interface ArchivedInventory {
   entries: Entry[];
 }
 const kind = "agent-inventory";
+/** The UID-bound retained source cannot be read; its agents are unknown, not empty. */
+export class RetainedInventoryUnavailableError extends Error {}
 const ArchivedInventorySchema = z.object({
   workspaceId: z.string(),
   workspaceUid: z.string(),
@@ -169,7 +171,7 @@ export async function readArchivedInventory(
     snapshot.data.workspaceId !== workspace.metadata.name ||
     snapshot.data.workspaceUid !== workspace.metadata.uid
   )
-    throw new Error(
+    throw new RetainedInventoryUnavailableError(
       `Workspace ${workspace.metadata.name} has no retained inventory; metadata unavailable`,
     );
   const response = SessionOutboundMessageSchema.parse({

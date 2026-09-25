@@ -3,7 +3,11 @@ import {
   getAgentStatusPriority,
   getWorkspaceStateBucketPriority,
 } from "@getpaseo/protocol/agent-state-bucket";
-import type { AgentSnapshotPayload, WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
+import type {
+  AgentSnapshotPayload,
+  SessionOutboundMessage,
+  WorkspaceDescriptorPayload,
+} from "@getpaseo/protocol/messages";
 import type { Project, Workspace } from "../domain.js";
 import { projectPath, workspacePath } from "../domain.js";
 
@@ -44,7 +48,9 @@ export function workspaceDescriptor(
   };
 }
 
-/** Full snapshots intentionally replace expired cursors. No incremental journal is implied. */
+/** Provides generation IDs for full snapshots and partial merge responses.
+ * Partial responses carry verified rows/removals; this is not a general delta journal.
+ */
 export class DirectoryGeneration {
   readonly id = randomUUID();
   private sequence = 0;
@@ -69,15 +75,31 @@ export class DirectoryGeneration {
  * Cursors expire on disconnect/replacement and never authorize access by themselves.
  */
 export class DirectoryPages {
+  private readonly syncByPage = new Map<
+    string,
+    NonNullable<
+      Extract<SessionOutboundMessage, { type: "fetch_agents_response" }>["payload"]["sync"]
+    >
+  >();
   private readonly snapshots = new Map<
     string,
     { key: string; entries: unknown[]; expiresAt: number; bytes: number }
   >();
   constructor(private readonly now: () => number = Date.now) {}
 
-  read<T>(key: string, page: { limit: number; cursor?: string } | undefined, entries?: T[]) {
+  read<T>(
+    key: string,
+    page: { limit: number; cursor?: string } | undefined,
+    entries?: T[],
+    sync?: NonNullable<
+      Extract<SessionOutboundMessage, { type: "fetch_agents_response" }>["payload"]["sync"]
+    >,
+  ) {
     for (const [id, snapshot] of this.snapshots)
-      if (snapshot.expiresAt <= this.now()) this.snapshots.delete(id);
+      if (snapshot.expiresAt <= this.now()) {
+        this.snapshots.delete(id);
+        this.syncByPage.delete(id);
+      }
     let id: string;
     let offset = 0;
     let rows: T[];
@@ -96,6 +118,7 @@ export class DirectoryPages {
         throw new Error("Directory cursor expired or invalid; restart the listing");
       id = token as string;
       rows = snapshot.entries as T[];
+      sync = this.syncByPage.get(id);
     } else {
       rows = entries ?? [];
       const bytes = Buffer.byteLength(JSON.stringify(rows));
@@ -112,6 +135,7 @@ export class DirectoryPages {
           const oldest = this.snapshots.keys().next().value;
           if (!oldest) break;
           this.snapshots.delete(oldest);
+          this.syncByPage.delete(oldest);
         }
         this.snapshots.set(id, {
           key,
@@ -119,12 +143,14 @@ export class DirectoryPages {
           bytes,
           expiresAt: this.now() + 5 * 60 * 1000,
         });
+        if (sync) this.syncByPage.set(id, sync);
       }
     }
     const limit = page?.limit ?? rows.length;
     const end = offset + limit;
     return {
       entries: rows.slice(offset, end),
+      ...(sync ? { sync } : {}),
       pageInfo: {
         nextCursor: end < rows.length ? `${id}:${end}` : null,
         prevCursor: offset ? `${id}:${Math.max(0, offset - limit)}` : null,

@@ -16,6 +16,17 @@ describe("aggregate directory pagination", () => {
     ).toEqual(second.entries);
   });
 
+  it("retains partial merge mode through every page of a Desktop-sized directory", () => {
+    const pages = new DirectoryPages();
+    const rows = Array.from({ length: 401 }, (_, id) => ({ id }));
+    const sync = { generation: "one", headSeq: 4, mode: "changes" as const, removals: [] };
+    const first = pages.read("agents", { limit: 200 }, rows, sync);
+    const second = pages.read("agents", { limit: 200, cursor: first.pageInfo.nextCursor ?? "" });
+    const third = pages.read("agents", { limit: 200, cursor: second.pageInfo.nextCursor ?? "" });
+    expect([first.sync, second.sync, third.sync]).toEqual([sync, sync, sync]);
+    expect([...first.entries, ...second.entries, ...third.entries]).toEqual(rows);
+  });
+
   it("rejects a cursor reused with another filter, expired cursor, or invalid offset", () => {
     let now = 0;
     const pages = new DirectoryPages(() => now);

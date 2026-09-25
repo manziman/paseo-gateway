@@ -28,7 +28,7 @@ import {
 } from "../domain.js";
 import type { RecordStore } from "../kubernetes/records.js";
 import type { Store } from "../kubernetes/store.js";
-import { readArchivedInventory } from "./agent-inventory.js";
+import { RetainedInventoryUnavailableError, readArchivedInventory } from "./agent-inventory.js";
 import type { AgentRouting } from "./agent-routing.js";
 import {
   authorizeProject,
@@ -169,6 +169,7 @@ export class GatewaySession {
   >();
   private readonly slots = new TerminalSlots();
   private readonly pages = new DirectoryPages();
+  private lastActiveAgentIds = new Map<string, string>(); // Public ID -> workspace UID.
   private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
   private readonly providerWatches = new Map<string, { projectUid: string; release: () => void }>();
@@ -935,6 +936,15 @@ export class GatewaySession {
         sort: message.sort,
         scope: "scope" in message ? message.scope : undefined,
         search: "search" in message ? message.search : undefined,
+        sources: workspaces.map((workspace) => [
+          workspace.metadata.name,
+          workspace.metadata.uid,
+          workspace.spec.projectRef,
+          workspace.spec.credentialProfile,
+          workspace.spec.residency,
+          workspace.status?.phase,
+          !!workspace.status?.storageDeletedAt,
+        ]),
       });
       if (message.page?.cursor) {
         this.options.emit({
@@ -948,7 +958,6 @@ export class GatewaySession {
             ...(message.type === "fetch_agents_request"
               ? {
                   subscriptionId: message.subscribe?.subscriptionId ?? null,
-                  sync: this.options.directory.snapshot(message.sync?.generation),
                 }
               : {}),
           },
@@ -956,25 +965,43 @@ export class GatewaySession {
         return;
       }
       const entries: { agent: AgentSnapshotPayload }[] = [];
+      let unavailable: RetainedInventoryUnavailableError | undefined;
+      const unavailableUids = new Set<string>();
       const inventory = message.filter?.includeArchived ? workspaces : active;
-      for (const workspace of inventory.filter(
+      const selectedInventory = inventory.filter(
         (w) =>
           !message.filter?.projectKeys?.length ||
           message.filter.projectKeys.includes(w.spec.projectRef),
-      )) {
+      );
+      const inspected = new Map<string, Workspace>(
+        selectedInventory.map((workspace) => [workspace.metadata.name, workspace]),
+      );
+      for (const workspace of selectedInventory) {
         if (workspace.spec.residency === "Archived" && this.options.inventoryStore) {
-          entries.push(
-            ...(await readArchivedInventory(
-              this.options.inventoryStore,
-              workspace,
-              message,
-              undefined,
-              this.options.agentRouting,
-            )),
-          );
+          try {
+            entries.push(
+              ...(await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                message,
+                undefined,
+                this.options.agentRouting,
+              )),
+            );
+          } catch (error) {
+            if (!(error instanceof RetainedInventoryUnavailableError)) throw error;
+            unavailable ??= error;
+            if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          }
           continue;
         }
-        if (!workspace.status) continue;
+        if (!workspace.status) {
+          unavailable ??= new RetainedInventoryUnavailableError(
+            `Workspace ${workspace.metadata.name} status unavailable; agent inventory unknown`,
+          );
+          if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          continue;
+        }
         const start = entries.length;
         try {
           if (workspace.spec.residency !== "Running" || workspace.status.phase !== "Ready")
@@ -1028,18 +1055,118 @@ export class GatewaySession {
         } catch (error) {
           entries.splice(start);
           if (!this.options.inventoryStore) throw error;
-          entries.push(
-            ...(await readArchivedInventory(
-              this.options.inventoryStore,
-              workspace,
-              message,
-              workspace.spec.residency === "Suspended" ? "suspended" : "stale",
-              this.options.agentRouting,
-            )),
-          );
+          try {
+            entries.push(
+              ...(await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                message,
+                workspace.spec.residency === "Suspended" ? "suspended" : "stale",
+                this.options.agentRouting,
+              )),
+            );
+          } catch (retainedError) {
+            if (!(retainedError instanceof RetainedInventoryUnavailableError)) throw retainedError;
+            unavailable ??= retainedError;
+            if (workspace.metadata.uid) unavailableUids.add(workspace.metadata.uid);
+          }
         }
       }
+      // A partial response must never assert that an unknown source is empty.
+      // Known rows or removals can still be delivered through merge mode.
       sortAgents(entries, message.sort);
+      const removals = new Set<string>();
+      if (
+        unavailable &&
+        message.type === "fetch_agents_request" &&
+        !message.filter?.includeArchived
+      ) {
+        // An archived workspace's retained IDs are authoritative tombstones for
+        // the active directory, even when another workspace is unavailable.
+        if (this.options.inventoryStore)
+          for (const workspace of workspaces.filter(
+            (row) =>
+              row.spec.residency === "Archived" &&
+              (!message.filter?.projectKeys?.length ||
+                message.filter.projectKeys.includes(row.spec.projectRef)),
+          )) {
+            inspected.set(workspace.metadata.name, workspace);
+            try {
+              for (const entry of await readArchivedInventory(
+                this.options.inventoryStore,
+                workspace,
+                undefined,
+                "archived",
+                this.options.agentRouting,
+              ))
+                removals.add(entry.agent.id);
+            } catch (error) {
+              if (!(error instanceof RetainedInventoryUnavailableError)) throw error;
+            }
+          }
+      }
+      const broadActive =
+        message.type === "fetch_agents_request" &&
+        message.scope === "active" &&
+        !message.filter &&
+        !("search" in message && message.search);
+      let nextActiveAgentIds: Map<string, string> | undefined;
+      if (broadActive) {
+        const byName = new Map(workspaces.map((row) => [row.metadata.name, row.metadata.uid]));
+        const current = new Map<string, string>();
+        for (const entry of entries) {
+          const uid = entry.agent.workspaceId && byName.get(entry.agent.workspaceId);
+          if (uid) current.set(entry.agent.id, uid);
+        }
+        if (unavailable) {
+          for (const [id, uid] of this.lastActiveAgentIds)
+            if (!current.has(id) && !unavailableUids.has(uid)) removals.add(id);
+          nextActiveAgentIds = new Map([
+            ...[...this.lastActiveAgentIds].filter(([, uid]) => unavailableUids.has(uid)),
+            ...current,
+          ]);
+        } else nextActiveAgentIds = current;
+      }
+      if (removals.size > 10000)
+        throw new Error("Directory removal capacity exceeded; narrow the filter");
+      if (unavailable && entries.length === 0 && removals.size === 0) throw unavailable;
+      const removalRows = [...removals].map((id) => ({ id, seq: this.options.directory.next() }));
+      // Backend and retained-record reads may outlive the caller's grant or a
+      // workspace UID. Fence the entire aggregate before exposing any entries.
+      const fresh = (await this.records()).workspaces;
+      for (const original of inspected.values()) {
+        const current = fresh.find((row) => row.metadata.name === original.metadata.name);
+        if (
+          !current ||
+          current.metadata.uid !== original.metadata.uid ||
+          current.spec.projectRef !== original.spec.projectRef ||
+          current.spec.credentialProfile !== original.spec.credentialProfile ||
+          current.spec.residency !== original.spec.residency ||
+          current.status?.phase !== original.status?.phase ||
+          !!current.status?.storageDeletedAt !== !!original.status?.storageDeletedAt
+        )
+          throw new Error("Workspace inventory changed during inspection; retry after reconnect");
+      }
+      const agentSync =
+        message.type === "fetch_agents_request"
+          ? this.options.directory.snapshot(message.sync?.generation)
+          : undefined;
+      const page = this.pages.read(
+        pageKey,
+        message.page,
+        entries,
+        agentSync
+          ? unavailable
+            ? {
+                ...agentSync,
+                mode: "changes" as const,
+                reason: undefined,
+                removals: removalRows,
+              }
+            : agentSync
+          : undefined,
+      );
+      if (nextActiveAgentIds) this.lastActiveAgentIds = nextActiveAgentIds;
       this.options.emit({
         type:
           message.type === "fetch_agents_request"
@@ -1047,11 +1174,10 @@ export class GatewaySession {
             : "fetch_agent_history_response",
         payload: {
           requestId,
-          ...this.pages.read(pageKey, message.page, entries),
+          ...page,
           ...(message.type === "fetch_agents_request"
             ? {
                 subscriptionId: message.subscribe?.subscriptionId ?? null,
-                sync: this.options.directory.snapshot(message.sync?.generation),
               }
             : {}),
         },
