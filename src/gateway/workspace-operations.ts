@@ -953,6 +953,7 @@ export class WorkspaceOperations {
 
   async observeSchedule(input: {
     scheduleId: string;
+    archiveOnFinish?: boolean;
     run: ScheduleRun;
     targetWorkspaceUid?: string;
   }): Promise<{ status: "succeeded" | "failed"; output?: string; error?: string } | undefined> {
@@ -1020,7 +1021,7 @@ export class WorkspaceOperations {
         );
         if (response.payload.status === "idle" && !completed) return undefined;
       }
-      if (!input.targetWorkspaceUid) {
+      if (!input.targetWorkspaceUid && input.archiveOnFinish !== false) {
         try {
           await this.archive(workspace.metadata.name, owner);
         } catch (error) {

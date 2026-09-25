@@ -211,6 +211,81 @@ describe("durable schedules", () => {
       run: { agentId, workspaceId: "one" },
     });
   });
+  it("passes the reserved new-agent archive preference to completion observation", async () => {
+    const observed: unknown[] = [];
+    const f = setup({
+      observe: async (input) => {
+        observed.push(input);
+        return { status: "succeeded" };
+      },
+    });
+    await f.add({
+      target: { ...create.target, config: { ...create.target.config, archiveOnFinish: false } },
+    });
+    f.advance(60000);
+    await f.service.tick();
+    await f.service.tick();
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({ archiveOnFinish: false });
+  });
+  it.each([false, true, undefined])(
+    "retains the fire-time archive preference %s through schedule edits and restart",
+    async (archiveOnFinish) => {
+      const observed: unknown[] = [];
+      const f = setup({
+        observe: async (input) => {
+          observed.push(input);
+          return { status: "succeeded" };
+        },
+      });
+      const id = await f.add({
+        target: { ...create.target, config: { ...create.target.config, archiveOnFinish } },
+      });
+      f.advance(60000);
+      await f.service.tick();
+      await f.rpc({
+        type: "schedule/update",
+        requestId: "edit",
+        scheduleId: id,
+        newAgentConfig: { archiveOnFinish: !(archiveOnFinish ?? true) },
+      });
+      await f.service.close();
+      const restarted = new ScheduleService(f.options);
+      await restarted.initialize();
+      await restarted.tick();
+      await restarted.close();
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toMatchObject({ archiveOnFinish: archiveOnFinish ?? true });
+      expect((await f.records.records("schedule-run"))[0]?.value).toMatchObject({
+        run: { status: "succeeded" },
+      });
+    },
+  );
+  it("defaults pre-upgrade run records to archive even when their schedule says false", async () => {
+    const observed: unknown[] = [];
+    const f = setup({
+      observe: async (input) => {
+        observed.push(input);
+        return { status: "succeeded" };
+      },
+    });
+    await f.add({
+      target: { ...create.target, config: { ...create.target.config, archiveOnFinish: false } },
+    });
+    f.advance(60000);
+    await f.service.tick();
+    await f.service.close();
+    const row = (await f.records.records<Record<string, unknown>>("schedule-run"))[0];
+    if (!row) throw new Error("Missing run");
+    delete row.value.archiveOnFinish;
+    await f.records.updateRecord(row);
+    const restarted = new ScheduleService(f.options);
+    await restarted.initialize();
+    await restarted.tick();
+    await restarted.close();
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({ archiveOnFinish: true });
+  });
   it("reserves a fire durably, deduplicates concurrent ticks and Forbid then observes completion", async () => {
     const f = setup({ observe: async () => ({ status: "succeeded", output: "done" }) });
     const id = await f.add();

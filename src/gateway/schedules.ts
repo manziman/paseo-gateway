@@ -25,6 +25,8 @@ const RunStateSchema = z.object({
   projectId: z.string(),
   credentialProfile: z.string(),
   targetWorkspaceUid: z.string().optional(),
+  // Capture cleanup policy at fire time; old records retain the previous archive behavior.
+  archiveOnFinish: z.boolean().default(true),
   phase: z.enum(["dispatching", "running", "finished", "unknown"]),
   run: ScheduleRunSchema,
 });
@@ -76,6 +78,7 @@ export interface ScheduleOptions {
   dispatch(input: ScheduleDispatch): Promise<{ agentId: string; workspaceId: string }>;
   observe?(input: {
     scheduleId: string;
+    archiveOnFinish?: boolean;
     run: ScheduleRun;
     targetWorkspaceUid?: string;
   }): Promise<ScheduleOutcome | undefined>;
@@ -533,6 +536,10 @@ export class ScheduleService {
       projectId: state.projectId,
       credentialProfile: state.credentialProfile,
       targetWorkspaceUid: state.targetWorkspaceUid,
+      archiveOnFinish:
+        schedule.target.type === "new-agent"
+          ? (schedule.target.config.archiveOnFinish ?? true)
+          : true,
       phase: "dispatching",
       run: {
         id: runId,
@@ -647,6 +654,7 @@ export class ScheduleService {
     const task = (async () => {
       const outcome = await observer({
         scheduleId: state.scheduleId,
+        archiveOnFinish: state.archiveOnFinish,
         run: state.run,
         targetWorkspaceUid: state.targetWorkspaceUid,
       });

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import { StoredScheduleSchema } from "@getpaseo/protocol/schedule/types";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkspaceAdmission } from "../src/controller/admission.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
@@ -274,4 +274,78 @@ describe("existing-agent schedule target", () => {
     expect(archives).toBe(0);
     expect(store.workspaceRows[0]?.spec.residency).toBe("Running");
   });
+});
+
+describe("new-agent schedule archive preference", () => {
+  it.each([
+    { status: "idle", archiveOnFinish: false },
+    { status: "error", archiveOnFinish: false },
+    { status: "idle", archiveOnFinish: true },
+    { status: "idle", archiveOnFinish: undefined },
+    { status: "error", archiveOnFinish: true },
+    { status: "timeout", archiveOnFinish: true },
+    { status: "idle", archiveOnFinish: true, teardownFailure: true },
+  ])(
+    "honors lifecycle preference $archiveOnFinish for $status (teardown failure $teardownFailure)",
+    async ({ status, archiveOnFinish, teardownFailure }) => {
+      const backend: Backend = {
+        async connect() {},
+        async close() {},
+        send() {},
+        binary() {},
+        async request(message) {
+          if (message.type === "open_project_request")
+            return outbound({
+              type: "open_project_response",
+              payload: { workspace: { id: "local" } },
+            });
+          if (message.type === "wait_for_finish_request")
+            return outbound({
+              type: "wait_for_finish_response",
+              payload: {
+                status,
+                lastMessage: "done",
+                error: status === "error" ? "Provider failed" : undefined,
+              },
+            });
+          throw new Error("Unexpected request");
+        },
+      };
+      const { store, operations } = fixture(backend);
+      const archive = vi.spyOn(operations, "archive").mockImplementation(async () => {
+        if (teardownFailure) throw new Error("Teardown failed");
+        const row = store.workspaceRows[0];
+        if (!row) throw new Error("Missing workspace");
+        row.spec.residency = "Archived";
+      });
+      const input = {
+        scheduleId: randomUUID(),
+        archiveOnFinish,
+        run: {
+          id: randomUUID(),
+          scheduledFor: "2026-09-24T00:00:00Z",
+          startedAt: "2026-09-24T00:00:00Z",
+          endedAt: null,
+          status: "running" as const,
+          agentId,
+          workspaceId: "one",
+          output: null,
+          error: null,
+        },
+      };
+      const outcome = await operations.observeSchedule(input);
+      if (status === "timeout") expect(outcome).toBeUndefined();
+      else
+        expect(outcome).toMatchObject({
+          status: status === "idle" && !teardownFailure ? "succeeded" : "failed",
+        });
+      const shouldArchive = archiveOnFinish !== false && status !== "timeout";
+      expect(archive).toHaveBeenCalledTimes(shouldArchive ? 1 : 0);
+      expect(store.workspaceRows[0]?.spec.residency).toBe(
+        shouldArchive && !teardownFailure ? "Archived" : "Running",
+      );
+      if (teardownFailure)
+        expect(outcome?.error).toContain("teardown failed; compute and storage retained");
+    },
+  );
 });

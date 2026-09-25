@@ -94,6 +94,14 @@ slot. Gateway restart therefore observes existing work rather than replacing it.
 Scheduler polling/observation errors must surface in operator diagnostics; a
 failing backend is not evidence of a successful or empty run.
 
+New-agent runs capture `archiveOnFinish` in their durable fire reservation. The
+upstream default is true: completion archives the workspace after teardown. Explicit
+false leaves the completed agent and workspace active, including a terminal failed
+run. Editing the schedule after a fire has been accepted does not change that run's
+cleanup policy, and the captured preference survives gateway restart. Run records
+created before this field existed retain the previous true behavior. Existing-agent
+schedule completion never archives its target workspace.
+
 History retains 50 terminal runs per schedule by default, configurable from 1 to
 200. Output is limited to 8 KiB characters and error text to 2 KiB characters.
 Active/unknown runs are preserved separately and bounded by the outstanding-run
