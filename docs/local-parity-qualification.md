@@ -496,3 +496,17 @@ UIDs and restart counts were unchanged by the gateway-only rollout. The operator
 subsequently confirmed that clicking the existing Desktop file link opens the
 file with matching contents. This completes the manual file-link opening check;
 the HTTP download observation above remains separately automated evidence.
+
+## Desktop schedule controls
+
+The schedule form initially showed an empty model search. The exact
+project-scoped snapshot request returned 15 ready Claude models, and applying
+that response to the unmodified upstream schedule form produced 14 selectable
+model rows. The operator subsequently created the test schedule without a
+gateway change. This records successful creation, not a fix for the intermittent
+empty picker; the latter remains an unqualified observation under #65.
+
+The operator confirmed that editing the daily time, saving, pausing, and
+resuming all worked and displayed the correct state. A subsequent manual
+Run now attempt did not show the expected result and is under investigation;
+schedule dispatch and agent completion are not yet counted as manual passes.
