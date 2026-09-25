@@ -476,5 +476,21 @@ returned those bytes. The same file was absent from the other test workspace.
 Replaying Desktop's workspace-scoped suffix lookup reproduced the failure:
 `directory_suggestions_request` with a workspace `cwd` was rejected as
 unsupported. Cwd-less project discovery has a separate existing handler. The
-generated file-link acceptance gate remains failed pending the routing fix and
-manual recheck tracked in #73; attachment upload success does not cover it.
+failure is tracked in #73; attachment upload success does not cover it.
+
+Commit `6bbb049` forwards that workspace-scoped request through the existing
+workspace authorization and lifecycle checks. The exact Session regression was
+red before the fix. All 328 unit/socket tests pass (two skipped), together with
+lint, typecheck, build, and release/qualification checks. The pinned native
+two-daemon suite passes the exact suffix lookup with relative paths, distinct
+files per workspace, and refusal to expose another workspace through traversal
+or absolute queries. Cwd-less project discovery remains covered separately.
+
+The corrected gateway was deployed locally with digest
+`sha256:66248cc28fa7ebfccce4808f9e83ddfa605f1f3e33e52808ef8bd2820107a946`.
+The original live reproduction now resolves the existing file in its workspace,
+returns no match from the second workspace, and reads matching bytes. HTTP
+download also returns matching contents and reuse of the consumed handle is
+rejected. Neither prompt nor file was recreated. Both existing workspace Pod
+UIDs and restart counts were unchanged by the gateway-only rollout. Manual
+confirmation that clicking the existing link opens the file remains pending.
