@@ -38,7 +38,7 @@ function setup() {
   git(["commit", "-am", "second"], source);
   git(["update-ref", "refs/pull/7/head", first], source);
   function initialize(overrides: Record<string, string> = {}, referencePath?: string) {
-    const script = `import { initialize } from ${JSON.stringify(pathToFileURL(resolve("docker/initialize.mjs")).href)}; await initialize(${JSON.stringify(data)}, ${JSON.stringify(referencePath)});`;
+    const script = `import { initialize } from ${JSON.stringify(pathToFileURL(resolve("docker/initialize.mjs")).href)}; await initialize(${JSON.stringify(data)}, ${JSON.stringify(referencePath)}, ${JSON.stringify(join(root, "pod-tmp", "checkout-budget.json"))});`;
     return spawnSync(process.execPath, ["--input-type=module", "-e", script], {
       encoding: "utf8",
       env: {
@@ -62,9 +62,110 @@ describe("workspace checkout initialization", () => {
     expect(fixture.git(["branch", "--show-current"], cwd)).toBe("feature/test");
     expect(fixture.git(["rev-list", "--count", "HEAD"], cwd)).toBe("1");
     writeFileSync(join(cwd, "file.txt"), "local work\n");
+    writeFileSync(join(fixture.root, "pod-tmp", "checkout-budget.json"), "corrupt old budget");
     expect(fixture.initialize({ REVISION: "missing" }).status).toBe(0);
     expect(readFileSync(join(cwd, "file.txt"), "utf8")).toBe("local work\n");
   });
+  it("does not retry a permanent fetch failure when kubelet reinvokes the same Pod initializer", () => {
+    const fixture = setup();
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    const count = join(fixture.root, "fetch-count");
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nif [ "$1" = "fetch" ]; then\n printf "x\\n" >> "$FETCH_COUNT"\n echo "fatal: Authentication failed" >&2\n exit 128\nfi\nexec "$REAL_GIT" "$@"\n',
+      { mode: 0o755 },
+    );
+    const env = { PATH: `${bin}:${process.env.PATH}`, FETCH_COUNT: count, REAL_GIT: realGit };
+    expect(fixture.initialize(env).status).not.toBe(0);
+    expect(fixture.initialize(env).status).not.toBe(0);
+    expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+  it("limits transient fetches to three across repeated initializer processes", () => {
+    const fixture = setup();
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    const count = join(fixture.root, "fetch-count");
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nif [ "$1" = "fetch" ]; then\n printf "x\\n" >> "$FETCH_COUNT"\n echo "fatal: Could not resolve host: sensitive.invalid" >&2\n exit 128\nfi\nexec "$REAL_GIT" "$@"\n',
+      { mode: 0o755 },
+    );
+    const env = { PATH: `${bin}:${process.env.PATH}`, FETCH_COUNT: count, REAL_GIT: realGit };
+    const first = fixture.initialize(env);
+    expect(first.status).not.toBe(0);
+    const ledgerPath = join(fixture.root, "pod-tmp", "checkout-budget.json");
+    const ledger = readFileSync(ledgerPath, "utf8");
+    expect(JSON.parse(ledger)).toMatchObject({
+      attempts: 3,
+      failure: { code: "CheckoutDnsUnavailable" },
+    });
+    const second = fixture.initialize(env);
+    expect(second.status).not.toBe(0);
+    expect(second.stderr).toContain("CheckoutDnsUnavailable");
+    expect(second.stderr).not.toContain("sensitive.invalid");
+    expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(3);
+    expect(readFileSync(ledgerPath, "utf8")).toBe(ledger);
+  });
+  it("preserves a pre-fetch claim after a killed initializer and recovers within the original budget", () => {
+    const fixture = setup();
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    const count = join(fixture.root, "fetch-count");
+    const killed = join(fixture.root, "killed-once");
+    const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(
+      join(bin, "git"),
+      '#!/bin/sh\nif [ "$1" = "fetch" ]; then\n printf "x\\n" >> "$FETCH_COUNT"\n if [ ! -e "$KILLED_MARKER" ]; then\n : > "$KILLED_MARKER"\n kill -KILL "$PPID"\n exit 128\n fi\nfi\nexec "$REAL_GIT" "$@"\n',
+      { mode: 0o755 },
+    );
+    const env = {
+      PATH: `${bin}:${process.env.PATH}`,
+      FETCH_COUNT: count,
+      REAL_GIT: realGit,
+      KILLED_MARKER: killed,
+    };
+    expect(fixture.initialize(env).signal).toBe("SIGKILL");
+    const ledgerPath = join(fixture.root, "pod-tmp", "checkout-budget.json");
+    const before = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    expect(before.attempts).toBe(1);
+    expect(fixture.initialize(env).status).toBe(0);
+    const after = JSON.parse(readFileSync(ledgerPath, "utf8"));
+    expect(after).toMatchObject({ attempts: 2, deadline: before.deadline });
+    expect(readFileSync(count, "utf8").trim().split("\n")).toHaveLength(2);
+  });
+  it.each(["expired", "consumed", "corrupt", "backoff"])(
+    "does not fetch from a %s persisted budget",
+    (kind) => {
+      const fixture = setup();
+      const ledgerPath = join(fixture.root, "pod-tmp", "checkout-budget.json");
+      mkdirSync(join(fixture.root, "pod-tmp"));
+      const startedAt = Date.now() - (kind === "expired" ? 160000 : 1000);
+      writeFileSync(
+        ledgerPath,
+        kind === "corrupt"
+          ? "broken"
+          : JSON.stringify({
+              version: 1,
+              startedAt,
+              deadline: startedAt + 150000,
+              attempts: kind === "consumed" ? 3 : 1,
+              nextAttemptAt: kind === "backoff" ? startedAt + 160000 : 0,
+            }),
+      );
+      const result = fixture.initialize();
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
+      expect(existsSync(join(fixture.data, "workspace/.git/FETCH_HEAD"))).toBe(false);
+      expect(result.stderr).toContain(
+        ["expired", "backoff"].includes(kind)
+          ? "CheckoutFetchTimeout"
+          : "CheckoutInitializationFailed",
+      );
+    },
+  );
   it("fetches a pull request head independently of the requested base revision", () => {
     const fixture = setup();
     expect(fixture.initialize({ PULL_REQUEST: "7", BRANCH: "pr/7" }).status).toBe(0);
@@ -80,6 +181,8 @@ describe("workspace checkout initialization", () => {
     expect(fixture.initialize({ REVISION: "missing" }).status).not.toBe(0);
     expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
     expect(existsSync(join(fixture.data, "workspace/.git"))).toBe(true);
+    // A new Pod (e.g. explicit suspend/resume) resets emptyDir, retaining its interrupted PVC.
+    rmSync(join(fixture.root, "pod-tmp"), { recursive: true, force: true });
     expect(fixture.initialize().status).toBe(0);
     expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(true);
     expect(readFileSync(join(fixture.data, "workspace/file.txt"), "utf8")).toBe("second\n");

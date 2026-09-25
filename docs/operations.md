@@ -79,7 +79,13 @@ Workspace pod replacement can interrupt
 an active turn even though files and provider history survive.
 
 The checkout init container retries only recognized transient Git DNS, network,
-and timeout failures, at most three fetch attempts within a 150-second budget.
+and timeout failures, at most three fetch attempts within a 150-second **Pod-wide**
+budget. A receipt in the Pod's `/tmp` emptyDir preserves the original deadline,
+consumed attempts, and retry backoff across checkout-container restarts. Each
+attempt is recorded before Git starts. Permanent failures and exhausted budgets
+are latched: kubelet may restart the failed init container under the unchanged
+`Always` policy, but it reports the same safe failure without fetching again.
+Malformed receipts fail closed. This does not alter daemon restart behavior.
 It keeps the same workspace volume and writes the ready marker only after a
 successful checkout. Authentication, missing revision, local storage, and
 unclassified failures stop promptly. The controller accepts only fixed
@@ -87,6 +93,17 @@ termination reason codes such as `CheckoutDnsUnavailable` and publishes a
 credential-safe status message; unknown or malformed container text remains
 `ContainerFailed`. These codes identify the observed fetch failure, not the
 underlying DNS service cause. A persistent DNS outage still prevents checkout.
+
+After repairing the cause, explicitly suspend the failed workspace, wait for its
+Pod to disappear, then resume it. The replacement Pod gets a fresh retry budget;
+the same PVC and any interrupted checkout remain. Do not delete the PVC or its
+checkout-ready marker. A successfully initialized PVC bypasses Git entirely on
+container or Pod restart, preserving dirty files and never replaying an agent.
+The budget applies to one Pod, not indefinitely across operator-created or
+controller-created replacement Pods. The initializer is the receipt's sole writer.
+This relies on Kubernetes' documented [init container restart behavior](https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#understanding-init-containers)
+and [`emptyDir` lifetime](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir):
+data survives a container crash and is deleted when its Pod is removed.
 
 One pod and a ReadWriteOnce PVC are sufficient for the local single-node POC,
 but are not fencing under node partitions. Never force-delete a pod on an

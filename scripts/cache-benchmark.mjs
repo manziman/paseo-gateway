@@ -36,7 +36,7 @@ try {
   for (let run = 0; run < 3; run++) {
     for (const mode of ["cold", "reference"]) {
       const data = join(root, `${mode}-${run}`);
-      const script = `import { initialize } from ${JSON.stringify(pathToFileURL(resolve("docker/initialize.mjs")).href)}; await initialize(${JSON.stringify(data)}, ${JSON.stringify(mode === "reference" ? cache : join(root, "absent"))});`;
+      const script = `import { initialize } from ${JSON.stringify(pathToFileURL(resolve("docker/initialize.mjs")).href)}; await initialize(${JSON.stringify(data)}, ${JSON.stringify(mode === "reference" ? cache : join(root, "absent"))}, ${JSON.stringify(join(data, "pod-tmp", "checkout-budget.json"))});`;
       const started = performance.now();
       const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
         env: {

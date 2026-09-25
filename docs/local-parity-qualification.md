@@ -269,9 +269,13 @@ preconditions.
 
 This test also observed six fetch calls across a restarted initializer: the
 Pod's `Always` restart policy lets kubelet start another bounded invocation.
-The current retry limit is not a Pod-wide or workspace-wide retry budget.
-Failed-initialization retry policy remains an explicit follow-up in #68; the
-exhaustion test does not qualify a permanent stop after three attempts.
+That tested image did not implement a Pod-wide retry budget. A follow-up now
+persists deadline, attempts, and terminal failure in the Pod emptyDir. Separate
+initializer-process regressions verify no additional fetch after permanent failure
+or three transient attempts; a killed initializer consumes its prewritten attempt,
+and a new Pod may retry against the retained PVC. These are local process tests;
+they do not retroactively change the earlier live result or qualify a new image
+on Kubernetes. Live Pod-restart qualification remains required for the new image.
 
 ## Live Desktop timeline delivery
 

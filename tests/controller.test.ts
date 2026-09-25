@@ -12,6 +12,17 @@ const config = {
   imagePullPolicy: "Never" as const,
 };
 describe("workspace lifecycle", () => {
+  it("keeps the checkout retry receipt on Pod-local storage while daemon restarts remain enabled", () => {
+    const { pod } = desiredResources(workspace(), project(), config);
+    expect(pod.spec?.restartPolicy ?? "Always").toBe("Always");
+    expect(pod.spec?.volumes?.find((volume) => volume.name === "tmp")).toMatchObject({
+      emptyDir: { sizeLimit: "512Mi" },
+    });
+    expect(
+      pod.spec?.initContainers?.find((container) => container.name === "checkout")?.volumeMounts,
+    ).toContainEqual({ name: "tmp", mountPath: "/tmp" });
+  });
+
   it("reconciles twice without duplicate resources or repeated status writes", async () => {
     const store = new MemoryStore();
     const row = workspace();
