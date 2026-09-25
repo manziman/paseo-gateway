@@ -240,7 +240,7 @@ pending; the successful prompted SDK test does not substitute for that check.
 ## Bounded checkout retry qualification
 
 The #68 implementation retries transient Git fetch failures at most three times
-within one shared 150-second deadline. Fixed failure categories replace raw Git
+per initializer invocation within one shared 150-second deadline. Fixed failure categories replace raw Git
 stderr in the initializer's termination message and controller status. Unit and
 socket regressions cover redaction, deadline enforcement, process-group cleanup,
 and propagation to the caller.
@@ -256,6 +256,22 @@ Archive and teardown completed, and the owned Workspace, PVC, Project, and
 CredentialProfile were removed with UID preconditions. This test qualifies
 transient-failure recovery; it does not establish the cause of the earlier DNS
 outage or live reporting after exhausting retries.
+
+A subsequent always-failing DNS fixture qualified exhaustion reporting: both
+the creation caller and Workspace status received the fixed
+`CheckoutDnsUnavailable` diagnostic with three attempts. The termination envelope
+reported the same stage, code, and attempt count. Neither caller nor status
+contained the injected raw-stderr canary or URL. The derivative test image was
+`sha256:29b6376e2892bf930aebaf4b23d88c5a874d02f0d5f8b7c75b70ae733520c7af`,
+based on the workspace image in the live timeline section below, with that
+section's gateway image. All owned fixture resources were removed with UID
+preconditions.
+
+This test also observed six fetch calls across a restarted initializer: the
+Pod's `Always` restart policy lets kubelet start another bounded invocation.
+The current retry limit is not a Pod-wide or workspace-wide retry budget.
+Failed-initialization retry policy remains an explicit follow-up in #68; the
+exhaustion test does not qualify a permanent stop after three attempts.
 
 ## Live Desktop timeline delivery
 
