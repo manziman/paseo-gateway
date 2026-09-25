@@ -1,5 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -55,6 +64,74 @@ function setup() {
   return { root, data, source, initialize, git, first };
 }
 describe("workspace checkout initialization", () => {
+  it("does not overwrite a preexisting checkout-budget temp-file symlink", () => {
+    const fixture = setup();
+    const parent = join(fixture.root, "pod-tmp");
+    mkdirSync(parent, { mode: 0o700 });
+    const victim = join(fixture.root, "victim.txt");
+    writeFileSync(victim, "sentinel");
+    symlinkSync(victim, join(parent, "checkout-budget.json.tmp"));
+    expect(fixture.initialize().status).toBe(0);
+    expect(readFileSync(victim, "utf8")).toBe("sentinel");
+  });
+  it("rejects a symlinked checkout-budget receipt before any Git fetch", () => {
+    const fixture = setup();
+    const parent = join(fixture.root, "pod-tmp");
+    mkdirSync(parent, { mode: 0o700 });
+    const startedAt = Date.now() - 1000;
+    const victim = join(fixture.root, "other-receipt.json");
+    writeFileSync(
+      victim,
+      JSON.stringify({
+        version: 1,
+        startedAt,
+        deadline: startedAt + 150000,
+        attempts: 0,
+        nextAttemptAt: 0,
+      }),
+      { mode: 0o600 },
+    );
+    symlinkSync(victim, join(parent, "checkout-budget.json"));
+    const result = fixture.initialize();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("CheckoutInitializationFailed");
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
+    expect(existsSync(join(fixture.data, "workspace/.git"))).toBe(false);
+    expect(readFileSync(victim, "utf8")).toContain('"attempts":0');
+  });
+  it("rejects a readable checkout-budget receipt before any Git fetch", () => {
+    const fixture = setup();
+    const parent = join(fixture.root, "pod-tmp");
+    mkdirSync(parent, { mode: 0o700 });
+    const startedAt = Date.now() - 1000;
+    writeFileSync(
+      join(parent, "checkout-budget.json"),
+      JSON.stringify({
+        version: 1,
+        startedAt,
+        deadline: startedAt + 150000,
+        attempts: 0,
+        nextAttemptAt: 0,
+      }),
+      { mode: 0o644 },
+    );
+    const result = fixture.initialize();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("CheckoutInitializationFailed");
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
+    expect(existsSync(join(fixture.data, "workspace/.git"))).toBe(false);
+  });
+  it("rejects a checkout-budget parent accessible by another user", () => {
+    const fixture = setup();
+    const parent = join(fixture.root, "pod-tmp");
+    mkdirSync(parent);
+    chmodSync(parent, 0o755);
+    const result = fixture.initialize();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("CheckoutInitializationFailed");
+    expect(existsSync(join(fixture.data, "checkout-ready"))).toBe(false);
+    expect(existsSync(join(fixture.data, "workspace/.git"))).toBe(false);
+  });
   it("creates a branch with bounded history and preserves dirty work on restart", () => {
     const fixture = setup();
     expect(fixture.initialize({ BRANCH: "feature/test" }).status).toBe(0);
@@ -141,7 +218,7 @@ describe("workspace checkout initialization", () => {
     (kind) => {
       const fixture = setup();
       const ledgerPath = join(fixture.root, "pod-tmp", "checkout-budget.json");
-      mkdirSync(join(fixture.root, "pod-tmp"));
+      mkdirSync(join(fixture.root, "pod-tmp"), { mode: 0o700 });
       const startedAt = Date.now() - (kind === "expired" ? 160000 : 1000);
       writeFileSync(
         ledgerPath,
@@ -154,6 +231,7 @@ describe("workspace checkout initialization", () => {
               attempts: kind === "consumed" ? 3 : 1,
               nextAttemptAt: kind === "backoff" ? startedAt + 160000 : 0,
             }),
+        { mode: 0o600 },
       );
       const result = fixture.initialize();
       expect(result.status).not.toBe(0);

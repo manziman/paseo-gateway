@@ -15,12 +15,26 @@ describe("workspace lifecycle", () => {
   it("keeps the checkout retry receipt on Pod-local storage while daemon restarts remain enabled", () => {
     const { pod } = desiredResources(workspace(), project(), config);
     expect(pod.spec?.restartPolicy ?? "Always").toBe("Always");
+    expect(pod.spec?.securityContext).toMatchObject({
+      runAsNonRoot: true,
+      runAsUser: 1000,
+      fsGroup: 1000,
+    });
     expect(pod.spec?.volumes?.find((volume) => volume.name === "tmp")).toMatchObject({
       emptyDir: { sizeLimit: "512Mi" },
+    });
+    expect(pod.spec?.volumes?.find((volume) => volume.name === "checkout-budget")).toMatchObject({
+      emptyDir: { sizeLimit: "1Mi" },
     });
     expect(
       pod.spec?.initContainers?.find((container) => container.name === "checkout")?.volumeMounts,
     ).toContainEqual({ name: "tmp", mountPath: "/tmp" });
+    expect(
+      pod.spec?.initContainers?.find((container) => container.name === "checkout")?.volumeMounts,
+    ).toContainEqual({ name: "checkout-budget", mountPath: "/run/paseo-checkout" });
+    expect(pod.spec?.containers?.[0]?.volumeMounts).not.toContainEqual(
+      expect.objectContaining({ name: "checkout-budget" }),
+    );
   });
 
   it("reconciles twice without duplicate resources or repeated status writes", async () => {

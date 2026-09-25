@@ -181,6 +181,7 @@ export function desiredResources(
               : []),
             { name: "data", mountPath: "/data" },
             { name: "tmp", mountPath: "/tmp" },
+            { name: "checkout-budget", mountPath: "/run/paseo-checkout" },
           ],
         },
       ],
@@ -239,6 +240,7 @@ export function desiredResources(
           ? { name: "data", emptyDir: { sizeLimit: config.storageSize } }
           : { name: "data", persistentVolumeClaim: { claimName: name } },
         { name: "tmp", emptyDir: { sizeLimit: "512Mi" } },
+        { name: "checkout-budget", emptyDir: { sizeLimit: "1Mi" } },
       ],
     },
   };

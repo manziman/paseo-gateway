@@ -80,8 +80,10 @@ an active turn even though files and provider history survive.
 
 The checkout init container retries only recognized transient Git DNS, network,
 and timeout failures, at most three fetch attempts within a 150-second **Pod-wide**
-budget. A receipt in the Pod's `/tmp` emptyDir preserves the original deadline,
-consumed attempts, and retry backoff across checkout-container restarts. Each
+budget. A receipt in an init-only, Pod-local `checkout-budget` emptyDir preserves
+the original deadline, consumed attempts, and retry backoff across
+checkout-container restarts. The initializer creates a private owner-only
+directory under `/run/paseo-checkout`; the daemon cannot mount that volume. Each
 attempt is recorded before Git starts. Permanent failures and exhausted budgets
 are latched: kubelet may restart the failed init container under the unchanged
 `Always` policy, but it reports the same safe failure without fetching again.
@@ -117,6 +119,13 @@ Image updates do not forcibly restart workspaces. Suspend/resume idle workspaces
 to adopt the configured image. Changes to the checkout revision, branch,
 credential-profile reference and project reference require a new workspace;
 the CRD enforces that immutability.
+The checkout-budget path change must be deployed with both the controller and
+workspace image. An old image ignores the new init-only mount; a new image in an
+old Pod spec cannot write its required receipt for a fresh or incomplete checkout
+and fails closed; an existing checkout-ready marker bypasses the budget. Existing Pods
+are not patched or restarted by this controller change, so a controlled
+suspend/resume is needed to adopt the paired candidate. Roll back both images
+together; do not fall back to the daemon-shared `/tmp` receipt path.
 
 ## Claude subscription credentials
 

@@ -1,5 +1,7 @@
-import { mkdir, open, rename } from "node:fs/promises";
-import { dirname } from "node:path";
+import { randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   CheckoutFailure,
@@ -22,12 +24,39 @@ const codes = new Set([
 ]);
 const invalid = () => new CheckoutFailure("prepare", "CheckoutInitializationFailed");
 
+async function privateParent(path, create = false) {
+  const parent = dirname(path);
+  if (create) await mkdir(parent, { recursive: true, mode: 0o700 });
+  const info = await lstat(parent);
+  if (
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    info.uid !== process.getuid() ||
+    (info.mode & 0o077) !== 0
+  )
+    throw invalid();
+  return parent;
+}
+
 /** A Pod-local emptyDir receipt; claims precede Git, so a killed init cannot reset its budget. */
 export async function checkoutBudget(path) {
+  try {
+    await privateParent(path, true);
+  } catch {
+    throw invalid();
+  }
   let state;
   try {
-    const file = await open(path, "r");
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
+      const info = await file.stat();
+      if (
+        !info.isFile() ||
+        info.uid !== process.getuid() ||
+        info.nlink !== 1 ||
+        (info.mode & 0o077) !== 0
+      )
+        throw invalid();
       const buffer = Buffer.alloc(2049);
       const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
       if (bytesRead > 2048) throw invalid();
@@ -66,15 +95,27 @@ export async function checkoutBudget(path) {
     };
   }
   const save = async () => {
-    await mkdir(dirname(path), { recursive: true });
-    const file = await open(`${path}.tmp`, "w", 0o600);
+    const parent = await privateParent(path);
+    const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`);
+    let created = false;
     try {
-      await file.writeFile(JSON.stringify(state));
-      await file.sync();
-    } finally {
-      await file.close();
+      const file = await open(
+        temporary,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      created = true;
+      try {
+        await file.writeFile(JSON.stringify(state));
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+      await rename(temporary, path);
+    } catch (error) {
+      if (created) await unlink(temporary).catch(() => {});
+      throw error;
     }
-    await rename(`${path}.tmp`, path);
   };
   const failure = () =>
     state.failure

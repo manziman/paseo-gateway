@@ -198,7 +198,7 @@ async function initializeInternal(dataRoot, referencePath, budgetPath) {
 export async function initialize(
   dataRoot = "/data",
   referencePath = "/reference/git",
-  budgetPath = "/tmp/paseo-checkout-budget/state.json",
+  budgetPath = "/run/paseo-checkout/private/state.json",
 ) {
   try {
     await initializeInternal(dataRoot, referencePath, budgetPath);
