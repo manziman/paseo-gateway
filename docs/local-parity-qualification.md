@@ -408,7 +408,14 @@ contradictory caller capabilities. Unit/socket tests cover Pending readiness,
 timeout recovery, healthy-workspace capacity, global/repository catalog
 isolation, identity and access changes, and close/expiry races.
 
-Temporary metadata-only relay tracing was removed after qualification. Manual
-Desktop confirmation of the corrected first-chat handoff remains pending. A
-35-minute read-only memory sampler is running for #72; its initial observations
+Temporary metadata-only relay tracing was removed after qualification. On
+2026-09-25, the operator confirmed that a fresh Claude chat displayed command
+activity and the requested reply automatically, without reopening or refreshing.
+This qualifies the corrected first-chat handoff in the ongoing Desktop session;
+the operator did not report a measured duration. The automated 20-second result
+above is not a measurement of that manual run. Fresh-preference, zero-Ready
+cold-start discovery, two-workspace isolation, and reconnect checks remain
+separate acceptance gates.
+
+A 35-minute read-only memory sampler is running for #72; its initial observations
 do not yet establish long-term stability or explain the historical restarts.
