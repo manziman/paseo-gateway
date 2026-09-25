@@ -532,3 +532,27 @@ This observation used the temporary memory-diagnostic gateway derived from the
 same deployed routing source as the file-link qualification above. The diagnostic
 adds bounded memory/event metadata probes; this UI observation does not qualify
 memory stability or a published image.
+
+## Bounded memory diagnostic follow-up
+
+A temporary diagnostic build of the deployed gateway ran from 16:51:23 through
+17:16:23 UTC on 2026-09-25 without a restart. Its 7,452 memory samples had a maximum
+gap of 273 ms. Peak process RSS was about 356 MiB and peak cgroup usage about
+374 MiB; the earlier rapid allocation was not reproduced. Operation traces were
+rate-limited, and allocation wrappers plus synchronous sampling can alter timing.
+This bounded observation does not resolve #72 or qualify memory stability.
+
+The normal gateway was restored afterward with digest
+`sha256:113c37e0af111775a52adef7dcbcd662a2e581a1e9fcab9e06bbd5d90cafabbf`.
+Authenticated Desktop-origin and reconnect probes passed. During that rollout
+and the next workspace image build, Docker Desktop's filesystem reached 100%.
+Both retained user workspace daemons failed startup with `ENOSPC` while writing
+their PID locks; their Pod UIDs remained unchanged. Reclaiming 3.3 GB from exact,
+unused project-generated intermediate build-cache records restored free space.
+No images, volumes, or workspace records were removed. Both daemons recovered
+automatically in their original Pods by 17:23:30 UTC, each with six daemon
+restarts and no transport restart. The original file-link lookup, matching bytes,
+HTTP download, single-use handle, and cross-workspace isolation checks passed
+again. No agent prompt was resent. The simultaneous normal-image memory
+observation is affected by this storage-pressure interval and is being restarted
+as a fresh observation after recovery.
