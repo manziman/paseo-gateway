@@ -10,8 +10,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "node --import tsx --watch src/main.ts",
-    "start": "node dist/main.js",
+    "dev": "node --no-maglev --import tsx --watch src/main.ts",
+    "start": "node --no-maglev dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
@@ -30,6 +30,7 @@
     "generate:crds": "node --import tsx scripts/generate-crds.ts",
     "credentials": "node --import tsx scripts/credentials.ts",
     "test:upstream": "node --import tsx scripts/upstream-test.ts",
+    "test:validator-memory": "node scripts/validator-memory.mjs",
     "test:provider-probe": "node --import tsx scripts/provider-probe-contract.ts",
     "release": "semantic-release",
     "test:release": "node --test tests/release*.mjs",

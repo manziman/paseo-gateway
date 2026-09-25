@@ -29,4 +29,7 @@ COPY --from=build /app/package.json ./package.json
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 USER 1000:1000
 EXPOSE 8080
-CMD ["node", "dist/main.js"]
+# The pinned SDK AOT validator reproduced a Maglev native-memory spike on
+# linux/arm64 Node 24.21.0; other architectures require separate qualification.
+# Keep this explicit: --no-maglev is not accepted in NODE_OPTIONS.
+CMD ["node", "--no-maglev", "dist/main.js"]

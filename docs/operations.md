@@ -163,6 +163,10 @@ image only after an explicit idle suspend/resume.
 
 ## Gateway memory budget
 
+The pinned gateway launch includes `--no-maglev` to avoid a reproduced native
+memory spike in the SDK validator. See the [exact scope and opt-in regression](gateway-validator-memory.md).
+This is an explicit Node argument; do not add it to `gateway.nodeOptions`.
+
 The local chart requests 512 MiB and limits the gateway to 1 GiB, with
 `gateway.nodeOptions: --max-old-space-size=256`. A long Claude response during
 recovery exceeded the original 512 MiB container limit even though JavaScript
