@@ -642,6 +642,14 @@ closed-status filtering also returned those rows. Both workspace UIDs and their
 suspended state were unchanged, with no Pods created. Manual visibility in the
 Desktop remains pending; this is an automated protocol qualification.
 
+The operator subsequently opened the retained test agent and received
+`gateway_operation_failed` for `agent.timeline.set_subscription.request` because
+the workspace was Suspended. Directory recovery therefore does not establish
+that opening a stopped conversation works. The pinned Desktop waits for this
+subscription acknowledgement before loading timeline history. Retained control
+records contain metadata only; uncached transcripts remain on the workspace
+volume and must not be replaced with a fabricated empty history.
+
 ## Normal-image memory recurrence
 
 The normal gateway image
@@ -660,3 +668,23 @@ window cannot rule out a trigger that recurred after 31 minutes, and its
 instrumentation may affect timing. The prior disk-pressure interval is recorded
 separately; these observations do not establish it as the cause. Issue #72 remains
 a release blocker.
+
+The extended metadata-only diagnostic reproduced the OOM at 18:16:00 UTC,
+15 minutes 6 seconds after process start. Its image was
+`sha256:12fb97280649fdee943dab925f76edb8a14fd6bbc2deec4d25c539eca691898a`,
+derived from normal image `a2501404911c35b1ee93060c195a1abb4640aae10075bec079c6bb5fbf9802b3`
+and source `4310497` with temporary instrumentation. An independent external
+200 ms sampler covered the final 4 minutes 40 seconds, not the entire window.
+It recorded PID 1 RSS rising from about 395 to 1024 MiB in 0.611 seconds before
+`OOMKilled`/exit 137.
+
+During the rise, the internal JavaScript timer continued sampling. Between its
+395 and 892 MiB RSS samples, heap used stayed near 121–122 MiB, external memory
+near 36 MiB, and ArrayBuffers near 1.2 MiB. This narrows the rapid growth to memory
+outside those counters, but does not identify its allocator. The immediately
+preceding second had no dropped operation events or active traced operation;
+the prior minute had 433 dropped events, so earlier activity cannot be excluded.
+No traced JavaScript Buffer allocation reached 8 MiB. The normal image was then
+restored, both workspace Pod UIDs remained unchanged, and two authenticated
+reconnect probes passed. The diagnostic collectors were stopped. This was an
+early failed observation, not a successful 60-minute soak.
