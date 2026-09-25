@@ -20,7 +20,9 @@ The relay accepts connections only on localhost and verifies TLS to the gateway.
 On 2026-09-25, the operator confirmed that the corrected fresh Claude chat flow
 displayed command activity and its reply without reopening or refreshing. See
 [the recorded qualification](local-parity-qualification.md#first-turn-catalog-handoff-and-latency)
-for the tested images and limits. This does not complete the remaining checklist
+for the tested images and limits. The operator also confirmed that two Claude
+chats in separate workspaces kept their messages and activity separate when
+switching between them. This does not complete the remaining checklist
 or the fresh-preference, zero-Ready cold-start scenario.
 
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.

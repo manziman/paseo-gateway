@@ -413,9 +413,13 @@ Temporary metadata-only relay tracing was removed after qualification. On
 activity and the requested reply automatically, without reopening or refreshing.
 This qualifies the corrected first-chat handoff in the ongoing Desktop session;
 the operator did not report a measured duration. The automated 20-second result
-above is not a measurement of that manual run. Fresh-preference, zero-Ready
-cold-start discovery, two-workspace isolation, and reconnect checks remain
-separate acceptance gates.
+above is not a measurement of that manual run.
+
+The operator then created a second Claude chat in a separate workspace and
+confirmed that switching between the two showed only each conversation's own
+messages and activity. Two-workspace Desktop isolation therefore passed in this
+session. Fresh-preference, zero-Ready cold-start discovery and reconnect/history
+checks remain separate acceptance gates.
 
 A 35-minute read-only memory sampler is running for #72; its initial observations
 do not yet establish long-term stability or explain the historical restarts.
