@@ -10,9 +10,9 @@ the explicitly repeated checks and recorded images. Current pre-EKS status:
 | GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
 | Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
 | Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
-| Scoped CLI permission resolution | Real aggregate listing passed; denial exposed a disconnect race tracked in #77 |
+| Scoped CLI permission resolution | Disconnect fix and pinned CLI contract pass; real two-workspace denial/approval replay remains pending (#77) |
 | Fresh-preference zero-Ready Desktop/ref picker | Pending final-candidate operator check (#65/#67) |
-| Stopped uncached transcript | Subscription correction passed; retained PVC history implementation/acceptance tracked in #76 |
+| Stopped uncached transcript | Bounded PVC snapshots implemented and reviewed; native image and stopped Desktop acceptance remain pending (#76) |
 | Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
 | Gateway memory | Targeted reproduction/mitigation and 80-minute process-age observation passed, with a recorded host-sleep sampling gap |
 | EKS CSI, network enforcement, node-loss fencing and exact cloud candidate | Pending isolated operator-led validation (#61) |
@@ -859,3 +859,30 @@ The correction and final live replay are tracked in #77. Both live fixtures were
 removed after normal controller teardown and observed Pod absence, using exact
 UIDs; cleanup required reconnecting after the first workspace archive closed the
 harness session.
+
+## Readiness follow-up — 2026-09-29
+
+The permission-disconnect correction has a deterministic socket regression for
+a received decision delayed by authorization while the CLI closes. A separate
+permission session allows bounded completion without extending unrelated
+in-flight mutations. Expiry, revocation, policy closes and shutdown still cancel
+the decision. The pinned official `@getpaseo/cli@0.9.1` lifecycle/permission and
+schedule contract suites passed using a disposable local installation. This
+fixture evidence does not replace the pending two-workspace real-provider replay
+of CLI denial, SDK approval and file isolation.
+
+[Retained history](retained-history.md) now captures bounded native projected
+pages on the workspace PVC before controlled shutdown. A metadata-only receipt
+selects an immutable snapshot; stopped reads use a credential-free, read-only
+helper with authorization and lifecycle checks before and after access. Source
+review and focused tests covered first capture, interrupted publication,
+concurrent archive generation changes, stale cleanup, cancellation and helper
+isolation. Existing suspended volumes without a snapshot still need the documented
+one-time resume/capture migration; already-archived volumes cannot be resumed. Long histories can be explicitly truncated;
+this is not unlimited offline transcript retention.
+
+The native daemon suite includes a real capture-to-file write/read assertion,
+but local Docker execution and the final Desktop checklist have not been run
+on this candidate. Local capacity and connection setup must be restored first.
+No EKS installation or live EKS qualification was performed in this follow-up.
+The published alpha.3 release remains distinct from this development candidate.

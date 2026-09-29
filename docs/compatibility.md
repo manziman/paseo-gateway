@@ -163,9 +163,13 @@ archived with their PVCs retained.
   workspace without a captured snapshot reports unavailable inventory. Metadata
   excludes transcripts, pending permissions and provider persistence details.
   Opening a retained agent does not start its workspace: the gateway acknowledges
-  its timeline membership from the UID-bound snapshot, then reports history as
-  unavailable while compute is stopped. A desktop-local cached transcript can
-  remain visible, but uncached history cannot be reconstructed from metadata.
+  its timeline membership from the UID-bound snapshot. Current images also
+  capture bounded native projected history on the retained PVC before controlled
+  shutdown. A credential-free reader serves that history without restarting the
+  provider; see [retained history](retained-history.md) for limits and migration.
+  Old images, failed captures and already-stopped volumes without a committed
+  snapshot report explicit uncached-history unavailability. Metadata alone cannot
+  reconstruct transcripts. Final native-image and Desktop acceptance is pending.
   Archived Ephemeral storage has been released, so its transcript may be gone.
 - File/Git operations and terminal traffic route to their workspace. Attachment
   uploads are bounded and staged until an agent operation identifies the target;

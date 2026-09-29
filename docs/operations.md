@@ -221,6 +221,14 @@ workspace; create another workspace with its own lifecycle instead.
 
 ### Terminal workspace resource cleanup
 
+Controlled shutdown with the current workspace image captures bounded projected
+history on retained storage. Opening a stopped conversation uses an isolated
+read-only helper; it does not resume the agent. Old images and already-stopped
+volumes have no retroactive snapshot. See [retained history](retained-history.md)
+for capture limits, migration, reader deadlines and the fail-closed file budget.
+Resume and storage cleanup wait for reader Pod absence, including terminating
+readers; a slow mount or deletion can therefore delay the transition.
+
 Once an Archived workspace's pod is actually absent, the controller removes its
 owned Service and scoped access Secret, even if the retained PVC has no expiration.
 It verifies workspace ownership labels and uses the observed resource UID as a
