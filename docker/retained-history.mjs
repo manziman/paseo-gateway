@@ -97,8 +97,11 @@ export async function writeSnapshot(root, uid, bytes) {
 }
 
 function snapshotParts(uid, fileName) {
-  const match = new RegExp(`^${uid}-(\\d+)-(\\d{13})-[a-f0-9-]+\\.json$`).exec(fileName);
-  return match ? { generation: Number(match[1]), capturedMs: Number(match[2]) } : null;
+  const prefix = `${uid}-`;
+  if (!fileName.startsWith(prefix)) return null;
+  const match = /^([1-9]\d*)-(\d{13})-[a-f0-9-]+\.json$/.exec(fileName.slice(prefix.length));
+  if (!match || !Number.isSafeInteger(Number(match[1]))) return null;
+  return { generation: Number(match[1]), capturedMs: Number(match[2]) };
 }
 
 /** Never remove the receipt file or a generation/capture newer than it. */
@@ -129,7 +132,8 @@ export async function pruneSnapshots(root, uid, committedFileName) {
   // Temp files cannot be active after the bounded controller capture and API
   // windows. A generous age avoids deleting a still-publishing snapshot.
   for (const name of await readdir(root)) {
-    if (!new RegExp(`^\\.${uid}\\.[a-f0-9-]+\\.tmp$`).test(name)) continue;
+    const prefix = `.${uid}.`;
+    if (!name.startsWith(prefix) || !/^[a-f0-9-]+\.tmp$/.test(name.slice(prefix.length))) continue;
     const path = resolve(root, name);
     const stat = await lstat(path);
     if (Date.now() - stat.mtimeMs > 10 * 60_000 && (stat.isFile() || stat.isSymbolicLink()))
@@ -147,7 +151,7 @@ export async function readAgent(root, uid, agentId, generation, fileName) {
   )
     throw new Error("Invalid retained history identity");
   await assertDirectory(root, false);
-  if (!new RegExp(`^${uid}-${generation}-\\d{13}-[a-f0-9-]+\\.json$`).test(fileName))
+  if (snapshotParts(uid, fileName)?.generation !== generation)
     throw new Error("Invalid retained history receipt filename");
   let handle;
   try {

@@ -462,12 +462,18 @@ try {
       "node",
       "/opt/paseo/retained-history.mjs",
     ];
-    const filename = execFileSync("docker", [...command, "write", ownedUid], {
-      input: Buffer.from(JSON.stringify(captured)),
-      encoding: "utf8",
-      env: { ...process.env, PASEO_PASSWORD: password },
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    // docker exec closes stdin unless --interactive is set, even when
+    // execFileSync supplies input. The read path needs no stdin forwarding.
+    const filename = execFileSync(
+      "docker",
+      ["exec", "--interactive", ...command.slice(1), "write", ownedUid],
+      {
+        input: Buffer.from(JSON.stringify(captured)),
+        encoding: "utf8",
+        env: { ...process.env, PASEO_PASSWORD: password },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    ).trim();
     const nativePage = JSON.parse(
       docker(
         ...command,

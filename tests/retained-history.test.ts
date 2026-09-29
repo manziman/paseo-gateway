@@ -334,6 +334,14 @@ describe("retained history snapshots", () => {
       };
       const first = await writeSnapshot(root, uid, Buffer.from(JSON.stringify(snapshot)));
       expect(await readAgent(root, uid, agentId, 1, first)).toMatchObject({ found: true, history });
+      for (const invalid of [
+        `../${first}`,
+        first.replace(uid, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+      ]) {
+        await expect(readAgent(root, uid, agentId, 1, invalid)).rejects.toThrow(/filename/);
+        await expect(pruneSnapshots(root, uid, invalid)).rejects.toThrow(/filename/);
+      }
+      await expect(readAgent(root, uid, agentId, 2, first)).rejects.toThrow(/filename/);
       const newer = await writeSnapshot(
         root,
         uid,

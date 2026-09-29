@@ -133,12 +133,12 @@ export async function latestRetainedHistoryReceipt(
   const record = await records.record<unknown>(RECEIPT_KIND, uid);
   if (!record) return undefined;
   const receipt = ReceiptSchema.parse(record.value);
+  const prefix = `${uid}-${receipt.workspaceGeneration}-`;
   if (
     receipt.workspaceId !== workspace.metadata.name ||
     receipt.workspaceUid !== uid ||
-    !new RegExp(`^${uid}-${receipt.workspaceGeneration}-\\d{13}-[a-f0-9-]+\\.json$`).test(
-      receipt.fileName,
-    )
+    !receipt.fileName.startsWith(prefix) ||
+    !/^\d{13}-[a-f0-9-]+\.json$/.test(receipt.fileName.slice(prefix.length))
   )
     return undefined;
   return receipt;
