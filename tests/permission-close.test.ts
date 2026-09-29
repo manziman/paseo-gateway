@@ -1,10 +1,14 @@
-import { SessionOutboundMessageSchema } from "@getpaseo/protocol/messages";
+import {
+  type SessionOutboundMessage,
+  SessionOutboundMessageSchema,
+} from "@getpaseo/protocol/messages";
 import { afterEach, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { scopedId } from "../src/domain.js";
 import { issueWorkspaceToken, verifyWorkspaceToken } from "../src/gateway/auth.js";
 import { workspaceDescriptor } from "../src/gateway/catalog.js";
 import { startGateway } from "../src/gateway/server.js";
+import { GatewaySession } from "../src/gateway/session.js";
 import { MemoryStore, project, workspace } from "./fixtures.js";
 
 const password = "0123456789abcdef0123456789abcdef";
@@ -20,13 +24,23 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function fixture(config: { scoped?: boolean; graceMs?: number } = {}) {
+async function fixture(
+  config: {
+    scoped?: boolean;
+    graceMs?: number;
+    holdOnRead?: number;
+    disconnectOnBackendClose?: boolean;
+    backendCloseDelayMs?: number;
+    holdSecondBackendConnect?: boolean;
+  } = {},
+) {
   const store = new MemoryStore();
   const row = workspace("one");
   store.workspaceRows = [row];
   const originalWorkspaces = store.workspaces.bind(store);
   let hold = false;
   let heldReads = 0;
+  let reads = 0;
   let releaseRead: (() => void) | undefined;
   let readEntered: (() => void) | undefined;
   let secondReadEntered: (() => void) | undefined;
@@ -41,15 +55,30 @@ async function fixture(config: { scoped?: boolean; graceMs?: number } = {}) {
   });
   store.workspaces = async () => {
     if (hold) {
-      heldReads++;
-      readEntered?.();
-      if (heldReads >= 2) secondReadEntered?.();
-      await heldRead;
+      reads++;
+      if (config.holdOnRead === undefined || reads === config.holdOnRead) {
+        heldReads++;
+        readEntered?.();
+        if (heldReads >= 2) secondReadEntered?.();
+        if (config.holdOnRead !== undefined) hold = false;
+        await heldRead;
+      }
     }
     return originalWorkspaces();
   };
   const forwarded: unknown[] = [];
   const otherMutations: unknown[] = [];
+  const backendEvents: ((message: SessionOutboundMessage) => void)[] = [];
+  let releaseSecondConnect: (() => void) | undefined;
+  let secondConnectEntered: (() => void) | undefined;
+  const secondConnectWait = new Promise<void>((resolve) => {
+    releaseSecondConnect = resolve;
+  });
+  const secondConnectStarted = new Promise<void>((resolve) => {
+    secondConnectEntered = resolve;
+  });
+  let backendConnects = 0;
+  let backendCloses = 0;
   const gateway = await startGateway({
     store,
     namespace: "test",
@@ -62,9 +91,21 @@ async function fixture(config: { scoped?: boolean; graceMs?: number } = {}) {
     ready: async () => true,
     scopedAuth: config.scoped ? scopedAuth : undefined,
     permissionCloseGraceMs: config.graceMs,
-    backendFactory: () => ({
-      async connect() {},
-      async close() {},
+    backendFactory: (_row, onMessage, _onBinary, onDisconnect) => ({
+      async connect() {
+        backendConnects++;
+        if (config.holdSecondBackendConnect && backendConnects === 2) {
+          secondConnectEntered?.();
+          await secondConnectWait;
+        }
+        backendEvents.push(onMessage);
+      },
+      async close() {
+        backendCloses++;
+        if (config.backendCloseDelayMs)
+          await new Promise((resolve) => setTimeout(resolve, config.backendCloseDelayMs));
+        if (config.disconnectOnBackendClose) onDisconnect();
+      },
       binary() {},
       send(message) {
         forwarded.push(message);
@@ -102,6 +143,7 @@ async function fixture(config: { scoped?: boolean; graceMs?: number } = {}) {
   const stop = async () => {
     if (stopped) return;
     stopped = true;
+    releaseSecondConnect?.();
     await gateway.close();
   };
   cleanups.push(stop);
@@ -181,6 +223,10 @@ async function fixture(config: { scoped?: boolean; graceMs?: number } = {}) {
   return {
     forwarded,
     otherMutations,
+    backendEvents,
+    backendCounts: () => ({ connects: backendConnects, closes: backendCloses }),
+    secondConnectStarted,
+    releaseSecondConnect,
     entered,
     secondEntered,
     releaseRead,
@@ -275,12 +321,14 @@ it("does not drain an accepted decision after a policy-error close", async () =>
 });
 
 it("cancels the decision when the gateway initiates an invalid-frame close", async () => {
+  const closeSpy = vi.spyOn(GatewaySession.prototype, "close");
   const test = await fixture();
   test.send();
   await test.entered;
   const closed = new Promise<number>((resolve) => test.ws.once("close", resolve));
   test.ws.send("{");
   expect(await closed).toBe(1007);
+  await expect.poll(() => closeSpy.mock.calls.length, { timeout: 1000, interval: 10 }).toBe(2);
   test.releaseRead?.();
   await new Promise((resolve) => setTimeout(resolve, 30));
   expect(test.forwarded).toHaveLength(0);
@@ -325,6 +373,74 @@ it("still reports a connected client's permission routing error once", async () 
     payload: { requestType: "agent_permission_response", requestId: "permission-one" },
   });
   expect(test.forwarded).toHaveLength(0);
+});
+
+it("releases each settled permission backend and recreates it for a later batch", async () => {
+  const test = await fixture({ disconnectOnBackendClose: true });
+  test.send("one", "permission-one");
+  await test.entered;
+  test.releaseRead?.();
+  await expect.poll(() => test.forwarded.length, { timeout: 1000, interval: 10 }).toBe(1);
+  await expect.poll(() => test.backendCounts().closes).toBe(1);
+  expect(test.backendCounts()).toEqual({ connects: 1, closes: 1 });
+  expect(test.ws.readyState).toBe(WebSocket.OPEN);
+
+  test.send("one", "permission-two");
+  await expect.poll(() => test.forwarded.length, { timeout: 1000, interval: 10 }).toBe(2);
+  await expect.poll(() => test.backendCounts().closes).toBe(2);
+  expect(test.backendCounts()).toEqual({ connects: 2, closes: 2 });
+  expect(test.ws.readyState).toBe(WebSocket.OPEN);
+  expect(test.forwarded).toContainEqual(
+    expect.objectContaining({ requestId: "permission-two", response: { behavior: "deny" } }),
+  );
+});
+
+it("an old backend close cannot disconnect a newer permission batch", async () => {
+  const test = await fixture({
+    disconnectOnBackendClose: true,
+    backendCloseDelayMs: 80,
+    holdSecondBackendConnect: true,
+  });
+  test.send("one", "permission-one");
+  await test.entered;
+  test.releaseRead?.();
+  await expect.poll(() => test.forwarded.length, { timeout: 1000, interval: 10 }).toBe(1);
+  await expect.poll(() => test.backendCounts().closes).toBe(1);
+  test.send("one", "permission-two");
+  await test.secondConnectStarted;
+  await new Promise((resolve) => setTimeout(resolve, 110));
+  expect(test.ws.readyState).toBe(WebSocket.OPEN);
+  expect(test.backendCounts()).toEqual({ connects: 2, closes: 1 });
+  test.releaseSecondConnect?.();
+  await expect.poll(() => test.forwarded.length, { timeout: 1000, interval: 10 }).toBe(2);
+  await expect.poll(() => test.backendCounts().closes).toBe(2);
+});
+
+it("does not relay unsolicited backend catalog updates from a pending permission session", async () => {
+  const test = await fixture({ holdOnRead: 3 });
+  const received: string[] = [];
+  test.ws.on("message", (data) => {
+    const packet = JSON.parse(data.toString());
+    if (packet.type === "session") received.push(packet.message.type);
+  });
+  test.send();
+  await test.entered;
+  expect(test.backendCounts().connects).toBe(1);
+  test.backendEvents[0]?.(
+    SessionOutboundMessageSchema.parse({
+      type: "providers_snapshot_update",
+      payload: {
+        cwd: "/workspaces/one",
+        entries: [],
+        generatedAt: new Date().toISOString(),
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(received).not.toContain("providers_snapshot_update");
+  test.releaseRead?.();
+  await expect.poll(() => test.forwarded.length, { timeout: 1000, interval: 10 }).toBe(1);
+  await expect.poll(() => test.backendCounts().closes).toBe(1);
 });
 
 it.each([-1, 0, Number.NaN, Number.POSITIVE_INFINITY, 60_001])(

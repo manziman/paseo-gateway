@@ -83,8 +83,7 @@ export async function startGateway(options: ServerOptions) {
     const close = () => {
       if (closing) return closing;
       sessions.delete(current);
-      sessionClosers.delete(current);
-      closing = current.close();
+      closing = current.close().finally(() => sessionClosers.delete(current));
       return closing;
     };
     sessions.add(current);
@@ -334,7 +333,7 @@ export async function startGateway(options: ServerOptions) {
         // A short-lived CLI closes immediately after this one-way message. Its
         // decision gets its own narrow session so ordinary in-flight work still
         // receives the original immediate-disconnect cancellation.
-        permissionSession = new GatewaySession({
+        const dedicated = new GatewaySession({
           ...options,
           operations: undefined,
           inventoryStore: undefined,
@@ -344,12 +343,22 @@ export async function startGateway(options: ServerOptions) {
           downloadHandles,
           principal,
           hello: { ...initialHello, clientId: randomUUID() },
-          emit: (message) => send(JSON.stringify({ type: "session", message })),
-          emitBinary: send,
-          disconnect: () =>
-            closeForPolicy(1012, "Workspace disconnected; reconnect and inspect before retrying"),
+          // The permission connection is only a one-way command path. Native
+          // subscriptions on its backend socket must not duplicate desktop
+          // timeline/catalog updates; preserve an error while the client lives.
+          emit: (message) => {
+            if (message.type === "rpc_error") send(JSON.stringify({ type: "session", message }));
+          },
+          emitBinary: () => {},
+          disconnect: () => {
+            // Expected close of an idle permission backend must not disconnect
+            // the desktop, nor can an old batch retire a newer one.
+            if (permissionSession === dedicated)
+              closeForPolicy(1012, "Workspace disconnected; reconnect and inspect before retrying");
+          },
         });
-        closePermission = trackSession(permissionSession);
+        permissionSession = dedicated;
+        closePermission = trackSession(dedicated);
       }
       const target = isPermission ? permissionSession : currentSession;
       const action = () => {
@@ -373,7 +382,21 @@ export async function startGateway(options: ServerOptions) {
       const finish = () => {
         inflight--;
         if (requestId) requestIds.delete(requestId);
-        pendingPermissions.delete(handled);
+        if (isPermission) {
+          pendingPermissions.delete(handled);
+          // The socket can stay open for hours. Release the extra backend
+          // subscription after this exact batch, without closing a newer one.
+          if (
+            !pendingPermissions.size &&
+            ws.readyState === WebSocket.OPEN &&
+            permissionSession === target
+          ) {
+            const closeIdlePermission = closePermission;
+            permissionSession = undefined;
+            closePermission = () => Promise.resolve();
+            void closeIdlePermission().catch(() => {});
+          }
+        }
       };
       void handled.then(finish, finish);
     });
