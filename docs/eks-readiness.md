@@ -6,6 +6,31 @@ installation and acceptance sequence. Passing Docker Desktop tests or a
 read-only preflight does not establish EKS storage fencing, network enforcement,
 or encrypted transport.
 
+## Candidate gate
+
+Complete these local checks before selecting the EKS candidate:
+
+1. Merge the permission-disconnect and retained-history fixes after their
+   regression, native daemon, security and chart checks pass. Replay an actual
+   CLI permission denial; a successful command exit alone does not prove the
+   waiting agent received the decision.
+2. Run the remaining [Desktop checks](manual-desktop-acceptance.md): a fresh
+   preference profile with a cold project catalog, nondefault branch selection,
+   first-turn activity without refresh, and opening a stopped conversation from
+   a newly captured history snapshot. Keep old-image history limitations explicit.
+3. Stage and qualify one immutable public alpha artifact set using the
+   [release runbook](releasing.md). Record exact image and chart digests for the
+   install, recovery, provider and private-worker tests. Development-image
+   evidence does not qualify a different published image.
+
+The [local qualification log](local-parity-qualification.md) distinguishes
+completed observations from pending checks. EKS validation and actual provider
+expiry or independently valid credential rotation remain separate gates; neither
+is satisfied by generated-invalid credential tests. Do not mark the parity epic
+complete merely because the candidate is ready for cloud validation.
+
+## Operator prerequisites
+
 Before scheduling that validation, the operator needs an owned namespace and
 release prefix, exact published gateway/workspace image digests and chart/CRD
 versions, a compatible encrypted EBS CSI StorageClass, available capacity, and
