@@ -52,6 +52,7 @@ COPY docker/checkout-budget.mjs /opt/paseo/checkout-budget.mjs
 COPY docker/inspect-refs.mjs /opt/paseo/inspect-refs.mjs
 COPY docker/git-credential.mjs /opt/paseo/git-credential.mjs
 COPY docker/teardown.mjs /opt/paseo/teardown.mjs
+COPY docker/retained-history.mjs /opt/paseo/retained-history.mjs
 COPY docker/tls-proxy.mjs /opt/paseo/tls-proxy.mjs
 COPY docker/token-file.mjs /opt/paseo/token-file.mjs
 # Remove the npm bin symlink before COPY, preserving the unmodified native launcher.

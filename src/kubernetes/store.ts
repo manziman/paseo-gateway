@@ -28,6 +28,19 @@ export interface Store {
   deleteStorage(name: string, uid: string): Promise<void>;
   /** Remove owned terminal workspace Service/access Secret; true only after both are absent. */
   deleteRuntime(workspace: Workspace): Promise<boolean>;
+  /** Optional on non-Kubernetes test stores; production uses a private PVC snapshot. */
+  supportsRetainedHistory?(workspace: Workspace): Promise<boolean>;
+  writeRetainedHistory?(workspace: Workspace, payload: Buffer): Promise<string>;
+  pruneRetainedHistory?(workspace: Workspace, fileName?: string): Promise<void>;
+  readRetainedHistory?(
+    workspace: Workspace,
+    agentId: string,
+    image: string,
+    fileName: string,
+    deadlineAt?: number,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  cleanupRetainedHistoryReaders?(): Promise<void>;
 }
 
 export function statusCode(error: unknown): number | undefined {

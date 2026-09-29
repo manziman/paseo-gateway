@@ -241,6 +241,8 @@ export async function deleteArchivedInventory(records: RecordStore, workspace: W
   if (!workspace.metadata.uid) return;
   const record = await records.record(kind, workspace.metadata.uid);
   if (record) await records.deleteRecord(record);
+  const history = await records.record("retained-history", workspace.metadata.uid);
+  if (history) await records.deleteRecord(history);
   // Creation receipts share the workspace's retention lifetime. Match immutable
   // identity, never just a reusable Kubernetes name; legacy unscoped records stay put.
   for (const receipt of [

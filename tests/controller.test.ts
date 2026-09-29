@@ -1,7 +1,7 @@
 import type { V1PersistentVolumeClaim, V1Pod } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 import { WorkspaceController } from "../src/controller/controller.js";
-import { desiredResources, resourceName } from "../src/controller/resources.js";
+import { desiredResources, historyReaderName, resourceName } from "../src/controller/resources.js";
 import { API_VERSION, CredentialProfileSchema } from "../src/domain.js";
 import { MemoryStore, project, workspace } from "./fixtures.js";
 
@@ -12,6 +12,26 @@ const config = {
   imagePullPolicy: "Never" as const,
 };
 describe("workspace lifecycle", () => {
+  it("waits for an owned read-only history helper before restarting a workspace Pod", async () => {
+    const store = new MemoryStore();
+    const row = workspace();
+    store.workspaceRows = [row];
+    store.objects.set(`Pod/${historyReaderName(row)}`, {
+      kind: "Pod",
+      metadata: {
+        name: historyReaderName(row),
+        uid: "reader-uid",
+        labels: { "paseo-gateway.manziman.github.io/workspace-uid": row.metadata.uid ?? "" },
+      },
+    });
+    const controller = new WorkspaceController(store, config);
+    await controller.reconcile(row, store.projectRows);
+    expect(store.objects.has(`Pod/${resourceName(row)}`)).toBe(false);
+    expect(row.status?.message).toMatch(/history reader/i);
+    store.objects.delete(`Pod/${historyReaderName(row)}`);
+    await controller.reconcile(row, store.projectRows);
+    expect(store.objects.has(`Pod/${resourceName(row)}`)).toBe(true);
+  });
   it("keeps the checkout retry receipt on Pod-local storage while daemon restarts remain enabled", () => {
     const { pod } = desiredResources(workspace(), project(), config);
     expect(pod.spec?.restartPolicy ?? "Always").toBe("Always");

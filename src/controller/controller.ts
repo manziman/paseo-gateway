@@ -9,7 +9,12 @@ import {
 import type { Infrastructure, InfrastructureKind, Store } from "../kubernetes/store.js";
 import { statusCode } from "../kubernetes/store.js";
 import { podDiagnostic } from "./diagnostics.js";
-import { desiredResources, type RuntimeConfig, resourceName } from "./resources.js";
+import {
+  desiredResources,
+  historyReaderName,
+  type RuntimeConfig,
+  resourceName,
+} from "./resources.js";
 
 /** Reconcile current desired state; events are hints, and may be repeated or missed. */
 export class WorkspaceController {
@@ -156,6 +161,13 @@ export class WorkspaceController {
       await this.report(workspace, "Pending", "Waiting for compute to stop; storage retained");
       return true;
     }
+    const reader = (await this.store.get("Pod", historyReaderName(workspace))) as V1Pod | undefined;
+    if (reader) {
+      if (reader.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
+        throw new Error("Unowned retained history reader blocks storage cleanup");
+      await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
+      return true;
+    }
     if (workspace.spec.residency === "Archived" && !(await this.store.deleteRuntime(workspace))) {
       await this.report(workspace, "Pending", "Waiting for owned runtime resources to be removed");
       return true;
@@ -216,6 +228,15 @@ export class WorkspaceController {
       return;
     }
     if (!(await this.store.get("Pod", name)) && workspace.spec.residency === "Running") {
+      const reader = (await this.store.get("Pod", historyReaderName(workspace))) as
+        | V1Pod
+        | undefined;
+      if (reader) {
+        if (reader.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
+          throw new Error("Unowned retained history reader blocks workspace start");
+        await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
+        return;
+      }
       let total = 0;
       let perProject = 0;
       for (const other of await this.store.workspaces()) {

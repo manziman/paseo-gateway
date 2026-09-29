@@ -39,6 +39,11 @@ import { type Backend, PaseoBackend } from "./backend.js";
 import { workspaceDescriptor } from "./catalog.js";
 import { CreationJournal, type CreationProgress } from "./creation-journal.js";
 import { checkedOutBranchName, fetchRevisionForRef } from "./project-ref-selection.js";
+import {
+  captureRetainedHistory,
+  latestRetainedHistoryReceipt,
+  publishRetainedHistoryReceipt,
+} from "./retained-history.js";
 import { object, translate } from "./routing.js";
 import { ScheduleDispatchRejected } from "./schedules.js";
 import type { UploadStaging } from "./uploads.js";
@@ -531,7 +536,7 @@ export class WorkspaceOperations {
     let ready: Workspace;
     try {
       ready = await this.ready(workspaceId, principal);
-      await this.snapshotInventory(ready);
+      await this.snapshotInventory(ready, (ready.metadata.generation ?? 1) + 1);
       await this.options.store.teardown(ready);
     } catch (error) {
       if (workspace.spec.residency === "Suspended") {
@@ -552,15 +557,40 @@ export class WorkspaceOperations {
     const current = (await this.options.store.workspaces()).find(
       (row) => row.metadata.name === workspaceId,
     );
-    if (!current || current.metadata.uid !== ready.metadata.uid)
+    if (
+      !current ||
+      current.metadata.uid !== ready.metadata.uid ||
+      current.metadata.generation !== ready.metadata.generation
+    )
       throw new Error("Workspace changed during archive");
     await this.options.store.setResidency(current, "Archived");
   }
 
   /** Trusted controller callback also covers archives requested directly through Kubernetes. */
-  async snapshotInventory(workspace: Workspace) {
+  async snapshotInventory(workspace: Workspace, expectedGeneration?: number) {
     const { backend, localId } = await this.backend(workspace, () => {});
     try {
+      if (await this.options.store.supportsRetainedHistory?.(workspace)) {
+        const snapshot = await captureRetainedHistory(backend, workspace, expectedGeneration);
+        if (this.options.store.pruneRetainedHistory) {
+          const previous = await latestRetainedHistoryReceipt(this.options.store, workspace);
+          await this.options.store.pruneRetainedHistory(workspace, previous?.fileName);
+        }
+        const fileName = await this.options.store.writeRetainedHistory?.(
+          workspace,
+          Buffer.from(JSON.stringify(snapshot)),
+        );
+        if (!fileName) throw new Error("Retained history snapshot could not be committed");
+        const committed = await publishRetainedHistoryReceipt(
+          this.options.store,
+          snapshot,
+          fileName,
+        );
+        if (this.options.store.pruneRetainedHistory)
+          await this.options.store
+            .pruneRetainedHistory(workspace, committed.fileName)
+            .catch(() => undefined);
+      }
       await archiveAgentInventory(this.options.store, backend, workspace, localId);
     } finally {
       await backend.close();
@@ -570,6 +600,27 @@ export class WorkspaceOperations {
   async snapshotSuspendedInventory(workspace: Workspace) {
     const { backend, localId } = await this.backend(workspace, () => {});
     try {
+      if (await this.options.store.supportsRetainedHistory?.(workspace)) {
+        const snapshot = await captureRetainedHistory(backend, workspace);
+        if (this.options.store.pruneRetainedHistory) {
+          const previous = await latestRetainedHistoryReceipt(this.options.store, workspace);
+          await this.options.store.pruneRetainedHistory(workspace, previous?.fileName);
+        }
+        const fileName = await this.options.store.writeRetainedHistory?.(
+          workspace,
+          Buffer.from(JSON.stringify(snapshot)),
+        );
+        if (!fileName) throw new Error("Retained history snapshot could not be committed");
+        const committed = await publishRetainedHistoryReceipt(
+          this.options.store,
+          snapshot,
+          fileName,
+        );
+        if (this.options.store.pruneRetainedHistory)
+          await this.options.store
+            .pruneRetainedHistory(workspace, committed.fileName)
+            .catch(() => undefined);
+      }
       await archiveAgentInventory(this.options.store, backend, workspace, localId, "suspended");
     } finally {
       await backend.close();

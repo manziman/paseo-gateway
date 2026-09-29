@@ -10,6 +10,7 @@ import { scopedId } from "../src/domain.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
 import { PaseoBackend } from "../src/gateway/backend.js";
+import { captureRetainedHistory } from "../src/gateway/retained-history.js";
 import { startGateway } from "../src/gateway/server.js";
 import { WorkspaceOperations } from "../src/gateway/workspace-operations.js";
 import { MemoryStore, workspace } from "../tests/fixtures.js";
@@ -143,6 +144,10 @@ const store = Object.assign(new MemoryStore(), {
   deleteRecord: identityRecords.deleteRecord.bind(identityRecords),
 });
 store.workspaceRows = [workspace("one"), workspace("two")];
+const ownedUid = randomUUID();
+const ownedOne = store.workspaceRows.find((row) => row.metadata.name === "one");
+if (!ownedOne) throw new Error("Missing owned fixture workspace");
+ownedOne.metadata.uid = ownedUid;
 let nativeCreations = 0;
 let operations: WorkspaceOperations | undefined;
 let faultProxy: Awaited<ReturnType<typeof lostAckProxy>> | undefined;
@@ -429,6 +434,61 @@ try {
     firstTimelineEvents.includes("timeline:user_message"),
     "Native user timeline item must reach the subscribed SDK",
   );
+  const historyBackend = new PaseoBackend(
+    `ws://127.0.0.1:${ports.get("one")}/ws`,
+    password,
+    { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
+    () => {},
+    () => {},
+    () => {},
+  );
+  await historyBackend.connect();
+  try {
+    const source = store.workspaceRows.find((row) => row.metadata.name === "one");
+    if (!source) throw new Error("Owned native workspace is missing");
+    const captured = await captureRetainedHistory(historyBackend, source);
+    assert.ok(
+      captured.agents[created.id]?.entries.some((entry) => entry.item.type === "user_message"),
+      "The unmodified daemon must supply a projected user timeline for PVC retention",
+    );
+    const nativeName = `${prefix}-one`;
+    const command = [
+      "exec",
+      "--user",
+      "1000:1000",
+      "--env",
+      "PASEO_RETAINED_HISTORY_ROOT=/home/paseo/.paseo/gateway-history",
+      nativeName,
+      "node",
+      "/opt/paseo/retained-history.mjs",
+    ];
+    const filename = execFileSync("docker", [...command, "write", ownedUid], {
+      input: Buffer.from(JSON.stringify(captured)),
+      encoding: "utf8",
+      env: { ...process.env, PASEO_PASSWORD: password },
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    const nativePage = JSON.parse(
+      docker(
+        ...command,
+        "read",
+        ownedUid,
+        created.id,
+        String(captured.workspaceGeneration),
+        filename,
+      ),
+    );
+    assert.equal(nativePage.found, true);
+    assert.ok(
+      nativePage.history.entries.some(
+        (entry: { item: { type: string } }) => entry.item.type === "user_message",
+      ),
+      "The new image must write and read native projected history from its owned home",
+    );
+  } finally {
+    await historyBackend.close();
+  }
+  console.log("PASS: unmodified daemon supplies bounded projected timeline pages for retention.");
   assert.equal(
     nativeUploads.length,
     1,
@@ -460,7 +520,7 @@ try {
     projectId: "example",
     credentialProfile: "claude-default",
     workspaceId: "one",
-    workspaceUid: "uid-one",
+    workspaceUid: ownedUid,
   });
   assert.match(secondAgent.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   const agents = await active.fetchAgents();

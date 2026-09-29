@@ -130,6 +130,7 @@ async function main() {
     scopedAuth,
     workspaceLogs: (workspace, tail) => store.workspaceLogs(workspace, tail),
     inventoryStore: store,
+    retainedHistoryImage: runtimeConfig.workspaceImage,
     agentRouting,
     advertised: { name: process.env.GATEWAY_NAME },
     operations: {
@@ -174,6 +175,11 @@ async function main() {
     30_000,
     "project_ref_recovery_failed",
   );
+  const historyReaderRecoveryLoop = periodic(
+    () => store.cleanupRetainedHistoryReaders(),
+    30_000,
+    "retained_history_reader_recovery_failed",
+  );
   const brokerLoop = periodic(
     async () => {
       const profiles = await store.credentialProfiles();
@@ -197,7 +203,7 @@ async function main() {
     abort.abort();
     await schedules.close(25000);
     await gateway.close();
-    await Promise.all([loop, scheduleLoop, refRecoveryLoop, brokerLoop]);
+    await Promise.all([loop, scheduleLoop, refRecoveryLoop, historyReaderRecoveryLoop, brokerLoop]);
   };
   process.once("SIGTERM", () => void shutdown());
   process.once("SIGINT", () => void shutdown());
