@@ -1664,6 +1664,7 @@ export class GatewaySession {
   private async forward(message: SessionInboundMessage, workspace: Workspace) {
     const validate = async () => {
       const { workspaces } = await this.records();
+      if (this.closed) throw new Error("Gateway session closed");
       const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
       if (
         !current ||
@@ -1710,6 +1711,8 @@ export class GatewaySession {
       typeof input.requestId !== "string"
     ) {
       // Here requestId identifies a permission prompt; upstream sends no RPC ack.
+      if (this.closed || this.closeController.signal.aborted)
+        throw new Error("Gateway session closed");
       connection.backend.send(input);
       return;
     }
