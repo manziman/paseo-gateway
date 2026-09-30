@@ -28,6 +28,7 @@ import {
 } from "../domain.js";
 import type { RecordStore } from "../kubernetes/records.js";
 import type { Store } from "../kubernetes/store.js";
+import { AgentRouteUnavailableError } from "./agent-identity.js";
 import { RetainedInventoryUnavailableError, readArchivedInventory } from "./agent-inventory.js";
 import type { AgentRouting } from "./agent-routing.js";
 import {
@@ -1285,15 +1286,26 @@ export class GatewaySession {
     if (message.type === "agent.timeline.set_subscription.request") {
       const grouped = new Map<string, string[]>();
       const retained: { workspace: Workspace; agentId: string }[] = [];
-      for (const id of message.agentIds) {
-        const resolved = this.options.agentRouting
-          ? await this.options.agentRouting.resolveAgent(id, workspaces)
-          : undefined;
+      const accepted: { id: string; workspace: Workspace }[] = [];
+      for (const id of new Set(message.agentIds)) {
+        // Desktop sends its complete set of open tabs. A stale tab must not
+        // prevent unrelated authorized timelines from being subscribed. Only
+        // known route unavailability is omitted; storage/corruption still fails.
+        let resolved: Awaited<ReturnType<AgentRouting["resolveAgent"]>> | undefined;
+        try {
+          resolved = this.options.agentRouting
+            ? await this.options.agentRouting.resolveAgent(id, workspaces)
+            : undefined;
+        } catch (error) {
+          if (error instanceof AgentRouteUnavailableError) continue;
+          throw error;
+        }
         const route = resolved
           ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
           : parseScopedId(id);
         const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
-        if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
+        if (!workspace) continue;
+        accepted.push({ id, workspace });
         if (workspace.spec.residency !== "Running") {
           retained.push({
             workspace,
@@ -1324,6 +1336,8 @@ export class GatewaySession {
         if (
           !current ||
           current.metadata.uid !== workspace.metadata.uid ||
+          current.spec.projectRef !== workspace.spec.projectRef ||
+          current.spec.credentialProfile !== workspace.spec.credentialProfile ||
           current.spec.residency !== "Running" ||
           current.status?.phase !== "Ready"
         )
@@ -1362,10 +1376,32 @@ export class GatewaySession {
             throw new Error("Retained timeline workspace stopped, replaced, or access revoked");
         }
       }
+      // Do not acknowledge a route that changed while a later backend was
+      // awaited. A concurrent revocation fails the request rather than being
+      // silently converted into initial stale-tab filtering.
+      if (this.options.agentRouting)
+        for (const entry of accepted)
+          await this.options.agentRouting.resolveAgent(entry.id, [entry.workspace]);
+      const finalWorkspaces = (await this.records()).workspaces;
+      for (const { workspace } of accepted) {
+        const current = finalWorkspaces.find(
+          (row) => row.metadata.name === workspace.metadata.name,
+        );
+        if (
+          !current ||
+          current.metadata.uid !== workspace.metadata.uid ||
+          current.spec.projectRef !== workspace.spec.projectRef ||
+          current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+          current.spec.residency !== workspace.spec.residency ||
+          current.status?.phase !== workspace.status?.phase ||
+          current.status?.storageDeletedAt
+        )
+          throw new Error("Timeline workspace changed or access was revoked before acknowledgment");
+      }
       if (this.closed) return;
       this.options.emit({
         type: "agent.timeline.set_subscription.response",
-        payload: { requestId, agentIds: message.agentIds },
+        payload: { requestId, agentIds: accepted.map((entry) => entry.id).sort() },
       });
       return;
     }
