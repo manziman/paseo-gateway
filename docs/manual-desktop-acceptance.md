@@ -23,8 +23,9 @@ instance a separate `PASEO_HOME` and disable built-in daemon management before
 launch. The [upstream packaged-app smoke test](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/e2e/packaged-app-smoke.js#L132)
 uses these isolation hooks; [Desktop applies the user-data override](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/src/main.ts#L299)
 before its single-instance lock. The installed 0.9.2 bundle was also checked for
-these branches. This recipe is source-verified; its actual fresh-client launch
-and cold-project flow still require acceptance.
+these branches. On 2026-09-30, the same isolation hooks in Desktop 0.10.2 passed
+the fresh-client launch and cold-project flow; see the
+[versioned evidence](local-parity-qualification.md#fresh-desktop-catalog-and-branch-selection--2026-09-30).
 
 ```sh
 umask 077
@@ -76,8 +77,10 @@ markers correctly when switching between them. A text file uploaded through the
 desktop attachment control was read by the agent with matching contents. After
 the #73 routing fix, the operator also opened an agent-generated file through
 its chat link and confirmed the contents matched. These
-results do not complete the remaining checklist or the fresh-preference,
-zero-Ready cold-start scenario.
+results do not complete the remaining checklist. The separate fresh-preference,
+zero-Ready cold-start scenario subsequently passed on 2026-09-30, including
+nondefault branch selection and automatic first-turn activity. Its observed
+discovery delays are recorded separately from functional success.
 
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.
 
@@ -103,12 +106,9 @@ does not qualify this handoff (tracked in #71). A saved provider preference or a
 workspace invalidates this cold-start check. It is tracked in
 [#65](https://github.com/manziman/paseo-gateway/issues/65).
 
-Until that check passes, a manual workaround is to submit a **blank** New
-Workspace Chat composer, wait for its workspace to become Ready, then select
-the provider and create Chat **inside that same workspace**. Launching a blank
-Terminal can also create a workspace without selecting a provider. Neither
-path verifies the first prompted Chat flow or repairs project-scoped provider
-discovery on the New Workspace screen.
+Do not substitute a blank workspace or Terminal launch for this acceptance
+case: those paths do not verify the first prompted Chat flow. On a failure,
+record the exact stage and inspect the created agent before resending anything.
 
 1. **Connection and projects:** Connect, select the gateway host, and confirm its project list. Disconnect/reconnect once and verify the same host and projects reappear. Check that an incorrect password is rejected, then restore the correct one.
 2. **Two-workspace isolation and live activity:** Create two test workspaces in the authorized project. Start one agent in each with distinct short prompts. Verify each conversation and workspace shows only its own prompt, reply, and status. In an existing chat, send a second harmless prompt such as `Run pwd once, then reply STREAM-OK`. Without refreshing or fetching history, verify tool activity and the final reply appear and the running state clears. Reasoning widgets depend on whether the provider emits reasoning; their absence alone is not a failure. Switch between the two chats and verify live activity stays with the selected agent. Note the provider and any error displayed; do not copy credential details into evidence. Missing live events despite completed stored history is tracked in [#69](https://github.com/manziman/paseo-gateway/issues/69).

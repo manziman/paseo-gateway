@@ -914,3 +914,35 @@ read-only checks confirmed every owned Project, CredentialProfile, Workspace,
 PVC and Pod was absent. Existing user workspaces were unchanged by this test.
 This completes the previously pending real-provider replay for #77; it does not
 qualify EKS or a different release artifact.
+
+## Fresh Desktop catalog and branch selection — 2026-09-30
+
+Paseo Desktop 0.10.2, using a new isolated preference directory with built-in
+daemon management disabled, passed the cold-project flow. Before discovery,
+the namespace had zero Ready workspaces and the uniquely scoped Project and
+CredentialProfile had no catalog record. Existing test workspaces were
+temporarily suspended with their original PVCs retained.
+
+The operator connected, selected the fresh project, chose Claude Code and a
+model, selected the nondefault `octocat-patch-1` branch in the worktree base
+picker, and submitted one prompted Chat. The chat opened and displayed command
+activity and its reply without refresh or prompt resubmission. Read-only
+postconditions confirmed exactly one workspace and agent, one user/assistant
+marker pair, a tool call, and an idle agent. The workspace's immutable revision
+and actual Git HEAD matched the selected remote branch; its generated local
+branch matched the workspace specification. `FETCH_HEAD` was subsequently
+different, so it was not used as proof of the originally selected checkout.
+
+The operator observed about one minute before providers/models appeared and
+10–20 seconds for branches. The catalog record was created at 15:25:28 UTC and
+verified at 15:25:46.946 UTC, about 19 seconds for that server-side interval.
+These are separate measurements; the longer end-to-end delay remains a
+performance observation, not an established latency guarantee.
+
+The gateway was a full production Dockerfile build from `8f28108`, digest
+`sha256:66c6c6e61fe4e5ccf46d77ad8f62de9f36a435573b46441e9e689f41b4043e55`;
+the workspace used the unchanged
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+This supplies the previously pending fresh-profile catalog, branch-picker and
+first-turn Desktop evidence. Stopped-history repeat-read acceptance and exact
+published-artifact qualification remain separate gates.
