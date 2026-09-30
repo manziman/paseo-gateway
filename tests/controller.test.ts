@@ -32,6 +32,82 @@ describe("workspace lifecycle", () => {
     await controller.reconcile(row, store.projectRows);
     expect(store.objects.has(`Pod/${resourceName(row)}`)).toBe(true);
   });
+  it("preserves completed stopped status and blocks archived PVC collection while a reader exists", async () => {
+    for (const residency of ["Suspended", "Archived"] as const) {
+      const store = new MemoryStore();
+      const row = workspace(residency.toLowerCase());
+      row.spec.residency = residency;
+      row.spec.retentionPolicy = { storage: "Retain", ttlAfterArchivedSeconds: 0 };
+      row.status = {
+        phase: residency,
+        message: "Compute stopped; storage retained",
+        observedGeneration: row.metadata.generation ?? 1,
+        ...(residency === "Archived"
+          ? { archivedAt: "2026-09-01T00:00:00Z", teardownCompletedAt: "2026-09-01T00:00:00Z" }
+          : {}),
+      };
+      store.workspaceRows = [row];
+      const pvc = {
+        kind: "PersistentVolumeClaim",
+        metadata: {
+          name: resourceName(row),
+          uid: "pvc-uid",
+          labels: { "paseo-gateway.manziman.github.io/workspace-uid": row.metadata.uid ?? "" },
+        },
+      };
+      store.objects.set(`PersistentVolumeClaim/${resourceName(row)}`, pvc);
+      store.objects.set(`Pod/${historyReaderName(row)}`, {
+        kind: "Pod",
+        metadata: {
+          name: historyReaderName(row),
+          uid: "reader-uid",
+          labels: { "paseo-gateway.manziman.github.io/workspace-uid": row.metadata.uid ?? "" },
+        },
+      });
+      const original = structuredClone(row.status);
+      await new WorkspaceController(store, config).reconcile(row, store.projectRows);
+      expect(row.status).toEqual(original);
+      expect(store.writes).toBe(0);
+      expect(store.objects.get(`PersistentVolumeClaim/${resourceName(row)}`)).toBe(pvc);
+    }
+  });
+  it("does not present an incomplete stop as completed when a reader exists", async () => {
+    const store = new MemoryStore();
+    const row = workspace();
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Pending", message: "Stopping compute", observedGeneration: 1 };
+    store.workspaceRows = [row];
+    store.objects.set(`Pod/${historyReaderName(row)}`, {
+      kind: "Pod",
+      metadata: {
+        name: historyReaderName(row),
+        uid: "reader-uid",
+        labels: { "paseo-gateway.manziman.github.io/workspace-uid": row.metadata.uid ?? "" },
+      },
+    });
+    await new WorkspaceController(store, config).reconcile(row, store.projectRows);
+    expect(row.status?.phase).toBe("Pending");
+    expect(row.status?.message).toMatch(/history reader/i);
+  });
+  it("does not preserve a stopped phase from an earlier workspace generation", async () => {
+    const store = new MemoryStore();
+    const row = workspace();
+    row.spec.residency = "Suspended";
+    row.metadata.generation = 2;
+    row.status = { phase: "Suspended", message: "Earlier stop", observedGeneration: 1 };
+    store.workspaceRows = [row];
+    store.objects.set(`Pod/${historyReaderName(row)}`, {
+      kind: "Pod",
+      metadata: {
+        name: historyReaderName(row),
+        uid: "reader-uid",
+        labels: { "paseo-gateway.manziman.github.io/workspace-uid": row.metadata.uid ?? "" },
+      },
+    });
+    await new WorkspaceController(store, config).reconcile(row, store.projectRows);
+    expect(row.status?.phase).toBe("Pending");
+    expect(row.status?.observedGeneration).toBe(2);
+  });
   it("keeps the checkout retry receipt on Pod-local storage while daemon restarts remain enabled", () => {
     const { pod } = desiredResources(workspace(), project(), config);
     expect(pod.spec?.restartPolicy ?? "Always").toBe("Always");

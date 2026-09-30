@@ -5,6 +5,9 @@ import {
   SessionOutboundMessageSchema,
 } from "@getpaseo/protocol/messages";
 import { describe, expect, it } from "vitest";
+import { WorkspaceController } from "../src/controller/controller.js";
+import { historyReaderName } from "../src/controller/resources.js";
+import { WORKSPACE_UID_LABEL } from "../src/domain.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { archiveAgentInventory } from "../src/gateway/agent-inventory.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
@@ -235,6 +238,83 @@ describe("retained timeline opening", () => {
       expect(f.backendOpened()).toBe(0);
       expect(f.store.workspaceRows[0]?.spec.residency).toBe("Suspended");
     } finally {
+      await f.session.close();
+    }
+  });
+  it("keeps a completed stopped phase while a retained read and controller reconcile overlap", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (value: unknown) => void;
+    const reading = new Promise<unknown>((resolve) => {
+      finish = resolve;
+    });
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        entered();
+        return reading;
+      },
+    });
+    f.store.objects.set(`Pod/${historyReaderName(f.row)}`, {
+      kind: "Pod",
+      metadata: {
+        name: historyReaderName(f.row),
+        uid: "reader-uid",
+        labels: { [WORKSPACE_UID_LABEL]: f.row.metadata.uid ?? "" },
+      },
+    });
+    const work = request(f, {
+      type: "fetch_agent_timeline_request",
+      requestId: "overlap",
+      agentId,
+      direction: "tail",
+      projection: "projected",
+    });
+    try {
+      await started;
+      await new WorkspaceController(f.store, {
+        workspaceImage: "paseo:test",
+        storageSize: "5Gi",
+        backendSecret: "paseo-backend",
+        imagePullPolicy: "Never",
+      }).reconcile(f.row, f.store.projectRows);
+      expect(f.row.status?.phase).toBe("Suspended");
+      finish({
+        found: true,
+        workspaceGeneration: 1,
+        capturedAt: stamp,
+        history: {
+          epoch: "retained-epoch",
+          window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+          entries: [
+            {
+              provider: "claude",
+              item: { type: "assistant_message", text: "saved result" },
+              timestamp: stamp,
+              seqStart: 1,
+              seqEnd: 1,
+              sourceSeqRanges: [{ startSeq: 1, endSeq: 1 }],
+              collapsed: [],
+            },
+          ],
+          truncated: false,
+        },
+      });
+      const replies = await work;
+      expect(replies).toContainEqual(
+        expect.objectContaining({
+          type: "fetch_agent_timeline_response",
+          payload: expect.objectContaining({ requestId: "overlap", error: null }),
+        }),
+      );
+      expect(replies).not.toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+      expect(f.backendOpened()).toBe(0);
+    } finally {
+      finish({ found: false });
+      await work;
       await f.session.close();
     }
   });

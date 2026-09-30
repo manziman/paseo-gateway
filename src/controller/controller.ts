@@ -165,7 +165,17 @@ export class WorkspaceController {
     if (reader) {
       if (reader.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
         throw new Error("Unowned retained history reader blocks storage cleanup");
-      await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
+      // A read-only helper does not undo an already completed stop. Keep the
+      // status (and resourceVersion) stable for reads fenced to this stop.
+      // Transitions that have not completed still remain Pending.
+      const completedStop =
+        workspace.status?.observedGeneration === (workspace.metadata.generation ?? 1) &&
+        ((workspace.spec.residency === "Suspended" && workspace.status.phase === "Suspended") ||
+          (workspace.spec.residency === "Archived" &&
+            workspace.status.phase === "Archived" &&
+            !!workspace.status.teardownCompletedAt));
+      if (!completedStop)
+        await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
       return true;
     }
     if (workspace.spec.residency === "Archived" && !(await this.store.deleteRuntime(workspace))) {
