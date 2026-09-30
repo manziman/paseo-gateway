@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { scopedId } from "../src/domain.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
+import type { GatewayPrincipal } from "../src/gateway/auth.js";
 import type { Backend } from "../src/gateway/backend.js";
 import { DirectoryGeneration, workspaceDescriptor } from "../src/gateway/catalog.js";
 import { GatewaySession } from "../src/gateway/session.js";
@@ -41,7 +42,7 @@ const agent = AgentSnapshotPayloadSchema.parse({
   labels: {},
 });
 
-function fixture() {
+function fixture(principal?: GatewayPrincipal) {
   const store = new MemoryStore();
   const row = workspace("one");
   store.workspaceRows = [row];
@@ -112,6 +113,7 @@ function fixture() {
   };
   const session = new GatewaySession({
     store,
+    principal,
     agentRouting: routing,
     namespace: "test",
     backendPassword: "backend",
@@ -236,6 +238,229 @@ describe("GUID agent session routing", () => {
     expect(f.requests).toHaveLength(0);
     expect(f.output).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
     await f.session.close();
+  });
+
+  it("keeps a valid timeline subscription when another durable route lost its workspace", async () => {
+    const f = fixture();
+    const staleId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    await f.routing.claim(workspace("one"), nativeId);
+    await f.routing.claim(workspace("deleted"), staleId);
+    f.setResponder((message) => {
+      if (message.type !== "agent.timeline.set_subscription.request")
+        throw new Error("Unexpected request");
+      return SessionOutboundMessageSchema.parse({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: message.requestId, agentIds: message.agentIds },
+      });
+    });
+    try {
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "valid-only",
+        agentIds: [nativeId],
+      });
+      expect(f.output).toContainEqual({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: "valid-only", agentIds: [nativeId] },
+      });
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "mixed-stale",
+        agentIds: [staleId, nativeId],
+      });
+      expect(f.output).toContainEqual({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: "mixed-stale", agentIds: [nativeId] },
+      });
+      expect(f.requests).toHaveLength(2);
+      expect(
+        f.requests.every(
+          (message) =>
+            message.type === "agent.timeline.set_subscription.request" &&
+            message.agentIds.length === 1 &&
+            message.agentIds[0] === nativeId,
+        ),
+      ).toBe(true);
+    } finally {
+      await f.session.close();
+    }
+  });
+
+  it.each(["missing", "replaced", "revoked-profile", "revoked-project"])(
+    "omits an initially %s route without leaking or starving authorized membership",
+    async (unavailable) => {
+      const principal: GatewayPrincipal = {
+        kind: "workspace",
+        version: 1,
+        audience: "test",
+        issuedAt: 0,
+        expiresAt: Math.floor(Date.now() / 1000) + 3600,
+        tokenId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        projectIds: ["example"],
+        credentialProfiles: ["claude-default"],
+        originWorkspaceId: "one",
+        originWorkspaceUid: "uid-one",
+      };
+      const f = fixture(principal);
+      const staleId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      await f.routing.claim(workspace("one"), nativeId);
+      if (unavailable !== "missing") {
+        const stale = workspace("other");
+        await f.routing.claim(stale, staleId);
+        if (unavailable === "replaced") stale.metadata.uid = "replacement";
+        if (unavailable === "revoked-profile") stale.spec.credentialProfile = "other-profile";
+        if (unavailable === "revoked-project") stale.spec.projectRef = "other-project";
+        f.store.workspaceRows.push(stale);
+      }
+      f.setResponder((message) => {
+        if (message.type !== "agent.timeline.set_subscription.request")
+          throw new Error("Unexpected request");
+        return SessionOutboundMessageSchema.parse({
+          type: "agent.timeline.set_subscription.response",
+          payload: { requestId: message.requestId, agentIds: message.agentIds },
+        });
+      });
+      try {
+        await f.session.handle({
+          type: "agent.timeline.set_subscription.request",
+          requestId: "mixed",
+          agentIds: [nativeId, staleId, nativeId],
+        });
+        expect(f.output).toContainEqual({
+          type: "agent.timeline.set_subscription.response",
+          payload: { requestId: "mixed", agentIds: [nativeId] },
+        });
+        expect(f.requests).toHaveLength(1);
+        expect(f.requests[0]).toMatchObject({ agentIds: [nativeId] });
+        await f.session.handle({
+          type: "fetch_agent_timeline_request",
+          requestId: "direct",
+          agentId: staleId,
+        });
+        expect(f.output).toContainEqual(
+          expect.objectContaining({
+            type: "rpc_error",
+            payload: expect.objectContaining({ requestId: "direct" }),
+          }),
+        );
+        expect(f.requests).toHaveLength(1);
+      } finally {
+        await f.session.close();
+      }
+    },
+  );
+
+  it("acknowledges no unavailable timelines and clears a previous valid subscription", async () => {
+    const f = fixture();
+    const missingId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    await f.routing.claim(workspace("one"), nativeId);
+    f.setResponder((message) => {
+      if (message.type !== "agent.timeline.set_subscription.request")
+        throw new Error("Unexpected request");
+      return SessionOutboundMessageSchema.parse({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: message.requestId, agentIds: message.agentIds },
+      });
+    });
+    try {
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "all-missing",
+        agentIds: [missingId],
+      });
+      expect(f.output).toContainEqual({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: "all-missing", agentIds: [] },
+      });
+      expect(f.requests).toHaveLength(0);
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "live",
+        agentIds: [nativeId],
+      });
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "clear",
+        agentIds: [missingId],
+      });
+      expect(f.output).toContainEqual({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: "clear", agentIds: [] },
+      });
+      expect(f.requests.at(-1)).toMatchObject({ agentIds: [] });
+    } finally {
+      await f.session.close();
+    }
+  });
+
+  it.each(["storage", "corrupt", "collision"])(
+    "fails closed on %s errors in a mixed timeline batch",
+    async (failure) => {
+      const f = fixture();
+      const invalidId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      await f.routing.claim(workspace("one"), nativeId);
+      if (failure === "storage") {
+        const original = f.records.record.bind(f.records);
+        f.records.record = async <T>(kind: string, id: string) => {
+          if (kind === "agent-route" && id === invalidId) throw new Error("Storage unavailable");
+          return original<T>(kind, id);
+        };
+      } else if (failure === "corrupt") {
+        await f.records.createRecord({
+          kind: "agent-route",
+          id: invalidId,
+          value: { state: "invalid" },
+        });
+      } else {
+        await f.routing.claim(workspace("one"), invalidId);
+        await expect(f.routing.claim(workspace("other"), invalidId)).rejects.toThrow(
+          "already bound",
+        );
+      }
+      try {
+        await f.session.handle({
+          type: "agent.timeline.set_subscription.request",
+          requestId: "fail",
+          agentIds: [nativeId, invalidId],
+        });
+        expect(f.output).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+        expect(f.output).not.toContainEqual(
+          expect.objectContaining({ type: "agent.timeline.set_subscription.response" }),
+        );
+        expect(f.requests).toHaveLength(0);
+      } finally {
+        await f.session.close();
+      }
+    },
+  );
+
+  it("does not acknowledge membership revoked while the backend subscription was awaited", async () => {
+    const f = fixture();
+    await f.routing.claim(workspace("one"), nativeId);
+    f.setResponder((message) => {
+      if (message.type !== "agent.timeline.set_subscription.request")
+        throw new Error("Unexpected request");
+      const current = f.store.workspaceRows[0];
+      if (!current) throw new Error("Missing workspace");
+      current.spec.credentialProfile = "changed-profile";
+      return SessionOutboundMessageSchema.parse({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: message.requestId, agentIds: message.agentIds },
+      });
+    });
+    try {
+      await f.session.handle({
+        type: "agent.timeline.set_subscription.request",
+        requestId: "revoked",
+        agentIds: [nativeId],
+      });
+      expect(f.output).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+      expect(f.output).not.toContainEqual(
+        expect.objectContaining({ type: "agent.timeline.set_subscription.response" }),
+      );
+    } finally {
+      await f.session.close();
+    }
   });
 
   it("fences timeline subscriptions after their final agent-route lookup", async () => {
