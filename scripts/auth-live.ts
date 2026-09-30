@@ -3,9 +3,10 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { WebSocket } from "ws";
+import type { WebSocket } from "ws";
 import { z } from "zod";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
+import { liveConnection, liveConnectionConfig } from "./live-connection.js";
 import { context, namespace } from "./local-config.js";
 
 // This fixture reads Kubernetes records and one owner Secret, then mints ephemeral
@@ -65,8 +66,11 @@ async function forward(): Promise<number> {
   );
 }
 
-async function rawConnection(url: string, token: string): Promise<WebSocket> {
-  const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
+async function rawConnection(
+  connection: ReturnType<typeof liveConnection>,
+  token: string,
+): Promise<WebSocket> {
+  const socket = connection.socket({ authorization: `Bearer ${token}` });
   sockets.add(socket);
   socket.on("error", () => {});
   await bounded(
@@ -99,8 +103,11 @@ async function rawConnection(url: string, token: string): Promise<WebSocket> {
   return socket;
 }
 
-async function rejectedUpgrade(url: string, token: string): Promise<number | undefined> {
-  const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
+async function rejectedUpgrade(
+  connection: ReturnType<typeof liveConnection>,
+  token: string,
+): Promise<number | undefined> {
+  const socket = connection.socket({ authorization: `Bearer ${token}` });
   sockets.add(socket);
   socket.on("error", () => {});
   return bounded(
@@ -125,7 +132,7 @@ async function rejectedUpgrade(url: string, token: string): Promise<number | und
 
 async function run() {
   const workspaceId = name.parse(process.env.PASEO_TEST_WORKSPACE);
-  const identitySecret = name.parse(process.env.PASEO_IDENTITY_SECRET ?? "paseo-identity");
+  const connectionConfig = await liveConnectionConfig();
   const store = new KubernetesStore(loadKubernetesConfig(context), namespace);
   stage = "fixture_workspace_read";
   const rows = await store.workspaces();
@@ -146,24 +153,14 @@ async function run() {
       !row.metadata.deletionTimestamp,
   );
   stage = "owner_secret_read";
-  const encoded = (await store.secret(identitySecret)).data?.password;
+  const encoded = (await store.secret(connectionConfig.identitySecret)).data?.password;
   assert.ok(encoded, "Owner credential unavailable");
   const owner = Buffer.from(encoded, "base64").toString("utf8").trim();
   assert.ok(owner.length >= 32, "Invalid owner credential");
   stage = "port_forward";
   const port = await forward();
-  const base = `http://127.0.0.1:${port}`;
-  const url = `ws://127.0.0.1:${port}/ws`;
-  const http = (path: string, token: string, body?: object) =>
-    fetch(`${base}${path}`, {
-      method: body ? "POST" : "GET",
-      headers: {
-        authorization: `Bearer ${token}`,
-        ...(body ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(10000),
-    });
+  const connection = liveConnection(port, connectionConfig);
+  const { url, http, transportFactory } = connection;
   const mint = async (ttlSeconds: number) => {
     const response = await http("/auth/workspace-token", owner, { workspaceId, ttlSeconds });
     assert.equal(response.status, 201, "Owner minting failed");
@@ -176,6 +173,7 @@ async function run() {
   const scoped = await mint(30);
   client = new DaemonClient({
     url,
+    transportFactory,
     password: scoped.token,
     clientId: randomUUID(),
     reconnect: { enabled: false },
@@ -213,7 +211,7 @@ async function run() {
   stage = "expiry_open_websocket";
   const expiring = await mint(3);
   assert.equal(expiring.expiresIn, 3);
-  const socket = await rawConnection(url, expiring.token);
+  const socket = await rawConnection(connection, expiring.token);
   const closed = new Promise<number>((resolve) => socket.once("close", resolve));
   // No ping or mutation is sent: verify the server closes an idle expired stream too.
   await delay(4100);
@@ -225,7 +223,7 @@ async function run() {
   );
   stage = "expiry_new_websocket_denial";
   assert.equal(
-    await rejectedUpgrade(url, expiring.token),
+    await rejectedUpgrade(connection, expiring.token),
     401,
     "Expired upgrade did not receive 401",
   );

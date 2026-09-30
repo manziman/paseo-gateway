@@ -9,7 +9,12 @@ import {
 import type { Infrastructure, InfrastructureKind, Store } from "../kubernetes/store.js";
 import { statusCode } from "../kubernetes/store.js";
 import { podDiagnostic } from "./diagnostics.js";
-import { desiredResources, type RuntimeConfig, resourceName } from "./resources.js";
+import {
+  desiredResources,
+  historyReaderName,
+  type RuntimeConfig,
+  resourceName,
+} from "./resources.js";
 
 /** Reconcile current desired state; events are hints, and may be repeated or missed. */
 export class WorkspaceController {
@@ -20,6 +25,7 @@ export class WorkspaceController {
       namespaceLimit?: number;
       now?: () => number;
       access?: { ensure(workspace: Workspace): Promise<void> };
+      beforeSuspend?: (workspace: Workspace) => Promise<void>;
       beforeArchive?: (workspace: Workspace) => Promise<void>;
       purgeInventory?: (workspace: Workspace) => Promise<void>;
     } = {},
@@ -129,10 +135,47 @@ export class WorkspaceController {
       });
       return true;
     }
+    if (
+      workspace.spec.residency === "Suspended" &&
+      pod?.metadata?.uid &&
+      !pod.metadata.deletionTimestamp &&
+      pod.status?.conditions?.some(
+        (condition) => condition.type === "Ready" && condition.status === "True",
+      ) &&
+      this.options.beforeSuspend
+    ) {
+      try {
+        await this.options.beforeSuspend(workspace);
+      } catch {
+        await this.report(
+          workspace,
+          "Failed",
+          "Inventory snapshot unavailable; compute and storage retained before suspension",
+        );
+        return true;
+      }
+    }
     if (pod?.metadata?.uid && !pod.metadata.deletionTimestamp)
       await this.store.deletePod(name, pod.metadata.uid);
     if (pod) {
       await this.report(workspace, "Pending", "Waiting for compute to stop; storage retained");
+      return true;
+    }
+    const reader = (await this.store.get("Pod", historyReaderName(workspace))) as V1Pod | undefined;
+    if (reader) {
+      if (reader.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
+        throw new Error("Unowned retained history reader blocks storage cleanup");
+      // A read-only helper does not undo an already completed stop. Keep the
+      // status (and resourceVersion) stable for reads fenced to this stop.
+      // Transitions that have not completed still remain Pending.
+      const completedStop =
+        workspace.status?.observedGeneration === (workspace.metadata.generation ?? 1) &&
+        ((workspace.spec.residency === "Suspended" && workspace.status.phase === "Suspended") ||
+          (workspace.spec.residency === "Archived" &&
+            workspace.status.phase === "Archived" &&
+            !!workspace.status.teardownCompletedAt));
+      if (!completedStop)
+        await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
       return true;
     }
     if (workspace.spec.residency === "Archived" && !(await this.store.deleteRuntime(workspace))) {
@@ -195,6 +238,15 @@ export class WorkspaceController {
       return;
     }
     if (!(await this.store.get("Pod", name)) && workspace.spec.residency === "Running") {
+      const reader = (await this.store.get("Pod", historyReaderName(workspace))) as
+        | V1Pod
+        | undefined;
+      if (reader) {
+        if (reader.metadata?.labels?.[WORKSPACE_UID_LABEL] !== workspace.metadata.uid)
+          throw new Error("Unowned retained history reader blocks workspace start");
+        await this.report(workspace, "Pending", "Waiting for retained history reader to finish");
+        return;
+      }
       let total = 0;
       let perProject = 0;
       for (const other of await this.store.workspaces()) {
@@ -226,6 +278,19 @@ export class WorkspaceController {
               workspace,
               "Failed",
               "Credential profile reference has a missing key",
+            );
+            return;
+          }
+          if (
+            reference.kind === "Secret" &&
+            reference.name === profile.spec.codexSubscription?.outputSecretName &&
+            reference.key === "access.json" &&
+            !object.data?.[reference.key]
+          ) {
+            await this.report(
+              workspace,
+              "Failed",
+              "Codex credential authority has no usable access credential",
             );
             return;
           }

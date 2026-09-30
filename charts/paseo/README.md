@@ -12,6 +12,8 @@ resource names are fixed.
   CI exercises Kubernetes 1.32 and 1.35 endpoints. Intermediate minors are in
   the declared range but are not individually exercised.
 - A default `ReadWriteOnce` StorageClass or an explicit `workspace.storageClass`.
+  A compatible CSI class can use `workspace.storageAccessMode: ReadWriteOncePod`
+  for newly created claims; existing PVC access modes are preserved.
   Each retained workspace asks for `workspace.storageSize` (default 5Gi). The
   gateway requests 100m CPU/512Mi RAM and is limited to 1 CPU/1Gi RAM. A running
   workspace additionally requests at least 350m CPU/640Mi RAM and limits its
@@ -95,6 +97,9 @@ Service is ClusterIP, not public ingress.
 | `image.pullPolicy`, `workspace.pullPolicy` | `IfNotPresent` | Kubernetes image pull policy. |
 | `gateway.identitySecret`, `backendSecret`, `signingSecret` | retained Secret names | Existing Secret references; chart does not create them. |
 | `workspace.storageClass`, `storageSize` | default class, `5Gi` | RWO workspace PVC configuration. |
+| `workspace.storageAccessMode` | `ReadWriteOnce` | Access mode for new PVCs; optionally `ReadWriteOncePod` with compatible CSI. |
+| `transport.tls.enabled` | `false` | Verified HTTPS/WSS on the gateway and workspace Services. |
+| `transport.tls.gatewaySecret`, `workspaceSecret` | `paseo-gateway-tls`, `paseo-workspace-tls` | Operator-provisioned TLS key, certificate and peer CA bundles. |
 | `resources` | gateway requests/limits above | Gateway Pod resources. |
 | `networkPolicy.enabled`, `egress.enabled` | `true`, `false` | Workspace ingress isolation and optional egress restrictions. |
 
@@ -102,6 +107,25 @@ Service is ClusterIP, not public ingress.
 invalid Secret names, quantities, image digests, and pull policies. Test custom
 values with `helm lint CHART -f values.yaml` and
 `helm template paseo CHART --namespace "$NAMESPACE" -f values.yaml`.
+
+## Encrypted transport
+
+For remote deployments, enable `transport.tls.enabled` and create both selected
+TLS Secrets before installation. Each contains `tls.crt`, `tls.key`, and `ca.crt`.
+The gateway certificate covers `paseo-gateway.NAMESPACE.svc` and its client-facing
+hostname; workspace certificates cover `*.NAMESPACE.svc`. The gateway Secret's
+CA trusts workspace certificates, while the workspace Secret's CA trusts the
+gateway. Use separate issuers/trust bundles so a workspace key cannot impersonate
+the gateway. Install the gateway's issuing CA in the client trust store.
+
+TLS adds a workspace proxy container requesting 10m CPU and 32Mi RAM, limited to
+200m CPU and 128Mi RAM. The daemon listens on loopback; Service port 6767 targets
+the proxy's TLS port 6768. Custom workspace images must include the supplied
+`/opt/paseo/tls-proxy.mjs`. Gateway certificate/trust changes require a gateway
+rollout; changing workspace trust roots requires replacing affected workspace
+Pods, interrupting their processes. See the
+[transport and rotation contract](https://github.com/manziman/paseo-gateway/blob/main/docs/transport-security.md).
+NetworkPolicy enforcement and storage fencing need separate live qualification.
 
 ## Upgrade, restart, and removal
 

@@ -42,7 +42,7 @@ docker image inspect "$WORKSPACE_IMAGE" > workspace-image-inspect.json
 docker run --rm --entrypoint sh "$GATEWAY_IMAGE" -ec 'node --version; dpkg-query -W' > gateway-inventory.txt
 docker run --rm --entrypoint sh "$WORKSPACE_IMAGE" -ec 'node --version; dpkg-query -W' > workspace-inventory.txt
 
-docker run --rm -v "$PWD:/audit:ro" --entrypoint node "$GATEWAY_IMAGE" /audit/scripts/inventory-npm-licenses.mjs /app/node_modules > gateway-npm-licenses.json
+docker run --rm -v "$PWD:/audit:ro" --entrypoint node "$GATEWAY_IMAGE" /audit/scripts/inventory-npm-licenses.mjs /app/node_modules /usr/local/lib/node_modules > gateway-npm-licenses.json
 docker run --rm -v "$PWD:/audit:ro" --entrypoint node "$WORKSPACE_IMAGE" /audit/scripts/inventory-npm-licenses.mjs /usr/local/lib/node_modules > workspace-npm-licenses.json
 
 docker run --rm --entrypoint dpkg-query "$GATEWAY_IMAGE" -W '-f=${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > gateway-debian-sources.tsv
@@ -81,3 +81,9 @@ intermediation. For Debian packages, verify exact source versions in the source
 manifest remain obtainable from the Debian archives; preserve and provide any
 missing corresponding source before publishing. No secret is included in the
 artifact inventory.
+
+The subscription-authority gateway also installs pinned Codex 0.156.1 in global
+npm directories. Inventory both `/app/node_modules` and
+`/usr/local/lib/node_modules` for this candidate and later releases; historical
+gateway package counts above precede that addition. Workspace Codex uses a
+project-owned stdio authentication wrapper around the unmodified official CLI.

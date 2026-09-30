@@ -8,12 +8,17 @@ import { resourceName } from "../src/controller/resources.js";
 import { API_GROUP, API_VERSION, workspacePath } from "../src/domain.js";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
 import { startActiveTurn, verifyActiveTurn } from "./active-turn.js";
+import { liveConnection, liveConnectionConfig } from "./live-connection.js";
 import { context, namespace } from "./local-config.js";
 
+const connectionConfig = await liveConnectionConfig();
 const config = loadKubernetesConfig(context);
 const api = config.makeApiClient(CoreV1Api);
 const store = new KubernetesStore(config, namespace);
-const identity = await api.readNamespacedSecret({ namespace, name: "paseo-identity" });
+const identity = await api.readNamespacedSecret({
+  namespace,
+  name: connectionConfig.identitySecret,
+});
 const encoded = identity.data?.password;
 if (!encoded) throw new Error("Run npm run dev:up first");
 const password = Buffer.from(encoded, "base64").toString("utf8");
@@ -37,6 +42,7 @@ async function connect() {
     ],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
+  proxy.stderr?.resume();
   const port = await new Promise<number>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Gateway port-forward did not start")), 15000);
     proxy?.stdout?.on("data", (chunk: Buffer) => {
@@ -55,8 +61,10 @@ async function connect() {
       reject(new Error("Port-forward exited"));
     });
   });
+  const connection = liveConnection(port, connectionConfig);
   client = new DaemonClient({
-    url: `ws://127.0.0.1:${port}/ws`,
+    url: connection.url,
+    transportFactory: connection.transportFactory,
     password,
     clientId: randomUUID(),
     reconnect: { enabled: false },

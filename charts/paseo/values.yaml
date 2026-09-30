@@ -13,6 +13,14 @@ workspace:
   pullPolicy: IfNotPresent
   storageClass: ""
   storageSize: 5Gi
+  # Requires a compatible CSI driver; existing PVCs are never migrated.
+  storageAccessMode: ReadWriteOnce
+transport:
+  tls:
+    enabled: false
+    # Each retained Secret needs tls.crt, tls.key and ca.crt.
+    gatewaySecret: paseo-gateway-tls
+    workspaceSecret: paseo-workspace-tls
 gateway:
   name: Paseo Gateway
   signingSecret: paseo-signing

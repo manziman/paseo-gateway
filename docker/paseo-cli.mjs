@@ -28,8 +28,28 @@ if (env.PASEO_GATEWAY_URL) {
   const workspace = env.PASEO_CLUSTER_WORKSPACE_ID;
   if (workspace) {
     env.PASEO_WORKSPACE_ID = workspace;
-    if (env.PASEO_AGENT_ID && !env.PASEO_AGENT_ID.includes("~"))
-      env.PASEO_AGENT_ID = `${workspace}~${Buffer.from(env.PASEO_AGENT_ID).toString("base64url")}`;
+    if (env.PASEO_AGENT_ID) {
+      if (command === "heartbeat") {
+        // Heartbeat sends this value as a schedule target, whose pinned wire
+        // contract requires the daemon's bare UUID. Other CLI commands route
+        // scoped IDs through the gateway as before.
+        if (env.PASEO_AGENT_ID.includes("~")) {
+          const [route, encoded, extra] = env.PASEO_AGENT_ID.split("~");
+          const nativeId = encoded ? Buffer.from(encoded, "base64url").toString() : "";
+          if (
+            route !== workspace ||
+            extra !== undefined ||
+            !/^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/.test(nativeId) ||
+            Buffer.from(nativeId).toString("base64url") !== encoded
+          ) {
+            process.stderr.write("Heartbeat agent does not belong to this workspace.\n");
+            process.exit(2);
+          }
+          env.PASEO_AGENT_ID = nativeId;
+        }
+      } else if (!env.PASEO_AGENT_ID.includes("~"))
+        env.PASEO_AGENT_ID = `${workspace}~${Buffer.from(env.PASEO_AGENT_ID).toString("base64url")}`;
+    }
   }
   // A plain in-agent `run` creates isolated sibling compute; explicit reuse remains supported.
   if (command === "run" && !args.some((arg) => /^(--workspace|--new-workspace)(=|$)/.test(arg))) {

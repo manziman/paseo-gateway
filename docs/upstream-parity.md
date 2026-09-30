@@ -140,3 +140,14 @@ inspection; they contain no prompt, environment or provider configuration.
 Tests exercise actual CLI feature negotiation with its legacy 60-second timer
 scaled to 100 milliseconds and a 300-millisecond create response, plus durable
 pending/reconnect, replacement, replay, scope revocation and concurrent-key cases.
+
+The native `npm run test:upstream` contract also inserts a bounded loopback fault
+proxy between the gateway and its owned daemon. It waits for a successful native
+agent creation, accepted prompt, or completed file write, then suppresses that
+acknowledgement and closes the connection. The caller must receive guidance to
+inspect before retrying. After gateway replacement, inspection finds exactly one
+agent, one user message, and the written file; counters confirm that none of the
+three native mutations was replayed. Reusing the ambiguous creation's idempotency
+key also must not dispatch a second creation. These fixtures use no provider
+credentials and do not assert model completion. Both daemon containers have CPU,
+memory, and process limits; their containers and volumes are removed afterward.

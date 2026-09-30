@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { dirname } from "node:path";
 import type { V1PersistentVolumeClaim, V1Pod, V1Service } from "@kubernetes/client-node";
 import { credentialProjection } from "../credentials/projection.js";
 import {
@@ -16,6 +17,8 @@ export interface RuntimeConfig {
   workspaceImage: string;
   referenceCacheAvailable?: boolean;
   storageClass?: string;
+  storageAccessMode?: "ReadWriteOnce" | "ReadWriteOncePod";
+  tlsSecret?: string;
   storageSize: string;
   backendSecret: string;
   imagePullPolicy: "Always" | "IfNotPresent" | "Never";
@@ -27,6 +30,88 @@ export function resourceName(workspace: Workspace): string {
     .update(workspace.metadata.uid ?? workspace.metadata.name)
     .digest("hex")
     .slice(0, 24)}`;
+}
+export function historyReaderName(workspace: Workspace): string {
+  if (!workspace.metadata.uid) throw new Error("Workspace UID required for history reader");
+  return `rh-${createHash("sha256").update(workspace.metadata.uid).digest("hex").slice(0, 24)}`;
+}
+
+/** No daemon, credential profile, Service, token, or writable mount is present. */
+export function desiredHistoryReader(
+  workspace: Workspace,
+  image: string,
+  namespace: string,
+): V1Pod {
+  const uid = workspace.metadata.uid;
+  if (!uid) throw new Error("Workspace UID required for history reader");
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: historyReaderName(workspace),
+      namespace,
+      labels: {
+        "app.kubernetes.io/managed-by": MANAGED_BY,
+        "app.kubernetes.io/component": "history-reader",
+        [WORKSPACE_UID_LABEL]: uid,
+      },
+      ownerReferences: [
+        {
+          apiVersion: workspace.apiVersion,
+          kind: workspace.kind,
+          name: workspace.metadata.name,
+          uid,
+          controller: true,
+          blockOwnerDeletion: false,
+        },
+      ],
+    },
+    spec: {
+      automountServiceAccountToken: false,
+      enableServiceLinks: false,
+      restartPolicy: "Never",
+      activeDeadlineSeconds: 90,
+      terminationGracePeriodSeconds: 1,
+      securityContext: {
+        runAsNonRoot: true,
+        runAsUser: 1000,
+        runAsGroup: 1000,
+        seccompProfile: { type: "RuntimeDefault" },
+      },
+      containers: [
+        {
+          name: "reader",
+          image,
+          imagePullPolicy: "IfNotPresent",
+          command: ["node", "-e", "setTimeout(() => {}, 80000)"],
+          securityContext: {
+            allowPrivilegeEscalation: false,
+            readOnlyRootFilesystem: true,
+            capabilities: { drop: ["ALL"] },
+          },
+          resources: {
+            requests: { cpu: "10m", memory: "32Mi" },
+            limits: { cpu: "200m", memory: "128Mi" },
+          },
+          env: [{ name: "PASEO_RETAINED_HISTORY_ROOT", value: "/history" }],
+          volumeMounts: [
+            {
+              name: "data",
+              mountPath: "/history",
+              subPath: "home/.paseo/gateway-history",
+              readOnly: true,
+            },
+          ],
+        },
+      ],
+      volumes: [
+        {
+          name: "data",
+          persistentVolumeClaim: { claimName: resourceName(workspace), readOnly: true },
+        },
+      ],
+    },
+  };
 }
 
 /** Resources are deterministic; PVCs deliberately have no owner reference so deletion retains data. */
@@ -75,12 +160,19 @@ export function desiredResources(
     readOnlyRootFilesystem: true,
     capabilities: { drop: ["ALL"] },
   };
+  // Kubelet creates subPath mount parents as root while preparing the checkout
+  // container. Create the home and profile-file parent directories first in a
+  // separate non-root init container that mounts only the data volume.
+  const profileHomeDirectories = [
+    "/data/home",
+    ...new Set((profile?.spec.files ?? []).map((file) => dirname(`/data/home/${file.path}`))),
+  ];
   const pvc: V1PersistentVolumeClaim = {
     apiVersion: "v1",
     kind: "PersistentVolumeClaim",
     metadata,
     spec: {
-      accessModes: ["ReadWriteOnce"],
+      accessModes: [config.storageAccessMode ?? "ReadWriteOnce"],
       resources: { requests: { storage: config.storageSize } },
       ...(config.storageClass ? { storageClassName: config.storageClass } : {}),
     },
@@ -89,7 +181,10 @@ export function desiredResources(
     apiVersion: "v1",
     kind: "Service",
     metadata: { ...metadata, ownerReferences },
-    spec: { selector: labels, ports: [{ name: "daemon", port: 6767, targetPort: 6767 }] },
+    spec: {
+      selector: labels,
+      ports: [{ name: "daemon", port: 6767, targetPort: config.tlsSecret ? 6768 : 6767 }],
+    },
   };
   const pod: V1Pod = {
     apiVersion: "v1",
@@ -109,11 +204,37 @@ export function desiredResources(
         seccompProfile: { type: "RuntimeDefault" },
       },
       initContainers: [
+        ...(profile?.spec.files?.length
+          ? [
+              {
+                name: "prepare-home",
+                image,
+                imagePullPolicy: config.imagePullPolicy,
+                command: [
+                  "node",
+                  "-e",
+                  "const {mkdir}=require('node:fs/promises');(async()=>{for(const path of process.argv.slice(1))await mkdir(path,{recursive:true})})().catch(error=>{console.error(error.code??'PrepareHomeFailed');process.exitCode=1})",
+                  ...profileHomeDirectories,
+                ],
+                securityContext,
+                resources: {
+                  requests: { cpu: "10m", memory: "32Mi" },
+                  limits: { cpu: "200m", memory: "128Mi" },
+                },
+                volumeMounts: [
+                  { name: "data", mountPath: "/data" },
+                  { name: "tmp", mountPath: "/tmp" },
+                ],
+              },
+            ]
+          : []),
         {
           name: "checkout",
           image,
           imagePullPolicy: config.imagePullPolicy,
           command: ["node", "/opt/paseo/initialize.mjs"],
+          terminationMessagePath: "/dev/termination-log",
+          terminationMessagePolicy: "File",
           env: [
             ...credentials.env,
             { name: "HOME", value: "/data/home" },
@@ -142,6 +263,7 @@ export function desiredResources(
               : []),
             { name: "data", mountPath: "/data" },
             { name: "tmp", mountPath: "/tmp" },
+            { name: "checkout-budget", mountPath: "/run/paseo-checkout" },
           ],
         },
       ],
@@ -156,7 +278,7 @@ export function desiredResources(
             ...credentials.env,
             { name: "HOME", value: "/home/paseo" },
             { name: "PASEO_HOME", value: "/home/paseo/.paseo" },
-            { name: "PASEO_LISTEN", value: "0.0.0.0:6767" },
+            { name: "PASEO_LISTEN", value: config.tlsSecret ? "127.0.0.1:6767" : "0.0.0.0:6767" },
             {
               name: "PASEO_HOSTNAMES",
               value: `${name},${name}.${workspace.metadata.namespace}.svc`,
@@ -200,9 +322,50 @@ export function desiredResources(
           ? { name: "data", emptyDir: { sizeLimit: config.storageSize } }
           : { name: "data", persistentVolumeClaim: { claimName: name } },
         { name: "tmp", emptyDir: { sizeLimit: "512Mi" } },
+        { name: "checkout-budget", emptyDir: { sizeLimit: "1Mi" } },
       ],
     },
   };
+  if (config.tlsSecret && pod.spec) {
+    const daemon = pod.spec.containers[0];
+    if (!daemon) throw new Error("Workspace daemon container is required");
+    // Kubelet TCP probes use the Pod IP; the unencrypted daemon is loopback-only.
+    const probe = { exec: { command: ["node", "/opt/paseo/tls-proxy.mjs", "probe"] } };
+    daemon.startupProbe = { ...probe, periodSeconds: 5, failureThreshold: 60 };
+    daemon.readinessProbe = { ...probe, periodSeconds: 5 };
+    daemon.livenessProbe = { ...probe, periodSeconds: 20, failureThreshold: 3 };
+    daemon.env?.push({ name: "NODE_EXTRA_CA_CERTS", value: "/run/paseo-tls/ca.crt" });
+    daemon.volumeMounts?.push({
+      name: "transport-ca",
+      mountPath: "/run/paseo-tls",
+      readOnly: true,
+    });
+    pod.spec.containers.push({
+      name: "transport",
+      image,
+      imagePullPolicy: config.imagePullPolicy,
+      command: ["node", "/opt/paseo/tls-proxy.mjs"],
+      securityContext,
+      ports: [{ name: "tls", containerPort: 6768 }],
+      resources: {
+        requests: { cpu: "10m", memory: "32Mi" },
+        limits: { cpu: "200m", memory: "128Mi" },
+      },
+      readinessProbe: { tcpSocket: { port: "tls" }, periodSeconds: 5 },
+      volumeMounts: [{ name: "transport", mountPath: "/run/paseo-tls", readOnly: true }],
+    });
+    pod.spec.volumes?.push(
+      { name: "transport", secret: { secretName: config.tlsSecret, defaultMode: 0o440 } },
+      {
+        name: "transport-ca",
+        secret: {
+          secretName: config.tlsSecret,
+          defaultMode: 0o440,
+          items: [{ key: "ca.crt", path: "ca.crt" }],
+        },
+      },
+    );
+  }
   if (config.gatewayUrl && pod.spec) {
     const daemon = pod.spec.containers[0];
     if (daemon) {

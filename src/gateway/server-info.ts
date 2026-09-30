@@ -13,6 +13,7 @@ export function buildServerInfo(
   input: ServerInfoConfig = {},
   principal: GatewayPrincipal = { kind: "owner" },
   creationLifecycle = false,
+  workspaceLabels = false,
 ) {
   const config = ServerInfoConfigSchema.parse(input);
   if (!serverId.trim()) throw new Error("A retained server ID is required");
@@ -37,8 +38,9 @@ export function buildServerInfo(
       directorySync: true,
       workspaceMultiplicity: true,
       agentThinkingUpdate: true,
+      selectiveAgentTimeline: true,
       daemonStatusRpc: true,
-      workspaceLabels: false,
+      workspaceLabels,
       ...(creationLifecycle ? { creationLifecycle: true } : {}),
     },
   });

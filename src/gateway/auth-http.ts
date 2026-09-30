@@ -16,7 +16,9 @@ export function allowedRequest(
     const host = request.headers.host;
     if (!host || !allowedHosts.includes(new URL(`http://${host}`).hostname)) return false;
     const origin = request.headers.origin;
-    return !origin || allowedHosts.includes(new URL(origin).hostname);
+    // The unmodified macOS desktop uses this custom application origin. It is
+    // not a network Host; accepting it must not expand allowed request hosts.
+    return !origin || origin === "paseo://app" || allowedHosts.includes(new URL(origin).hostname);
   } catch {
     return false;
   }

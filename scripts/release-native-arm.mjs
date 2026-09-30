@@ -83,6 +83,14 @@ export function verifyNativeArm(
         ],
         { env, stdio: "inherit" },
       );
+      // Exercise the exact pulled artifact with its packaged Node command before
+      // signing. The portable suite cannot detect this ARM64 optimizer failure.
+      const memory = JSON.parse(
+        command("node", ["scripts/validator-memory.mjs", reference], { env }),
+      );
+      if (memory.status !== "PASS" || memory.baseline !== false)
+        throw new Error("Gateway validator memory qualification failed");
+      evidence.gatewayMemory = memory;
     } else {
       command("npm", ["run", "test:upstream"], {
         env: { ...env, UPSTREAM_TEST_IMAGE: reference, DOCKER_DEFAULT_PLATFORM: "linux/arm64" },
