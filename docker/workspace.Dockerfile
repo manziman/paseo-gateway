@@ -13,9 +13,17 @@ RUN tar -xzf /tmp/esbuild.tar.gz --strip-components=1 \
 # callable API but needs uc.micro 2; nest it so markdown-it keeps uc.micro 1.
 ADD --checksum=sha256:f5169c5e5d837b5229180cb7214102d42f5c963f6932f284b608ef9549e927b4 https://registry.npmjs.org/linkify-it/-/linkify-it-5.0.2.tgz /tmp/linkify-it.tgz
 ADD --checksum=sha256:a31660c690ddac370fe4b17fe6a3a73b8df094f99194ac90d0668d797dabf69b https://registry.npmjs.org/uc.micro/-/uc.micro-2.1.0.tgz /tmp/uc.micro.tgz
+# npm 12.1.0 bundles vulnerable copies of these two dependencies. Keep the
+# supported npm CLI version, but replace only its bundled copies with fixed
+# releases from the same major lines. npm 12.2.0 still bundles the old versions.
+ADD --checksum=sha256:67bb5a1b4d4a8ff497d845a0b891ffe6b7233aea2202641315cec88d0fff15eb https://registry.npmjs.org/brace-expansion/-/brace-expansion-5.0.11.tgz /tmp/brace-expansion.tgz
+ADD --checksum=sha256:e18191aac9c0ff43dac7fe9b10b7041a22d07addb7b66a6e8ac14a52a5b69b74 https://registry.npmjs.org/undici/-/undici-6.28.1.tgz /tmp/undici.tgz
 RUN mkdir -p /patched-linkify /patched-uc-micro \
     && tar -xzf /tmp/linkify-it.tgz -C /patched-linkify --strip-components=1 \
-    && tar -xzf /tmp/uc.micro.tgz -C /patched-uc-micro --strip-components=1
+    && tar -xzf /tmp/uc.micro.tgz -C /patched-uc-micro --strip-components=1 \
+    && mkdir -p /patched-brace-expansion /patched-undici \
+    && tar -xzf /tmp/brace-expansion.tgz -C /patched-brace-expansion --strip-components=1 \
+    && tar -xzf /tmp/undici.tgz -C /patched-undici --strip-components=1
 
 FROM ghcr.io/getpaseo/paseo:0.9.1@sha256:9aae08258b6ff85853da3144ef48c2fd355cfe644500ca4d6041753da589098d
 ARG TARGETARCH
@@ -33,6 +41,12 @@ RUN npm install --global @anthropic-ai/claude-code@2.1.274 @openai/codex@0.156.1
     && npm cache clean --force
 RUN npm install --global npm@12.1.0 --ignore-scripts \
     && npm cache clean --force \
+    && npm --version | grep -Fx '12.1.0'
+RUN rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion \
+    /usr/local/lib/node_modules/npm/node_modules/undici
+COPY --from=esbuild /patched-brace-expansion/ /usr/local/lib/node_modules/npm/node_modules/brace-expansion/
+COPY --from=esbuild /patched-undici/ /usr/local/lib/node_modules/npm/node_modules/undici/
+RUN node -e 'const b = require("/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json"); const u = require("/usr/local/lib/node_modules/npm/node_modules/undici/package.json"); if (b.version !== "5.0.11" || u.version !== "6.28.1") process.exit(1)' \
     && npm --version | grep -Fx '12.1.0'
 # Replace only upstream Paseo's 0.25.12 platform executable. Other esbuild
 # installations in user workspaces keep their own version-matched binaries.
