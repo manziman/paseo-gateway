@@ -886,3 +886,31 @@ but local Docker execution and the final Desktop checklist have not been run
 on this candidate. Local capacity and connection setup must be restored first.
 No EKS installation or live EKS qualification was performed in this follow-up.
 The published alpha.3 release remains distinct from this development candidate.
+
+## Candidate permission replay — 2026-09-29
+
+The full Docker Desktop candidate passed all four live permission checks. Two
+Claude agents in separate workspaces requested permission for harmless fixture
+file writes. The scoped in-pod CLI listed both; CLI denial removed only the first
+agent's permission while the second remained pending. SDK approval then allowed
+only the second workspace's file write. Both Pods kept their UIDs and had zero
+container restarts during this run.
+
+The gateway used
+`sha256:201b228edb78ef99a3f4a7332625bc5eb56469ed04d6bb3c4d945d46fbfceb3c`;
+both workers used
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+These were full production Dockerfile builds from source `d4d09e0`, not published
+release artifacts.
+
+An earlier disposable run failed at its first agent creation with a connection
+timeout and completed normal teardown. Its cause remains unconfirmed. The
+successful replay observed Ready Pods and Services with endpoints targeting the
+exact Pods; each agent creation completed in roughly two seconds. No product fix
+is claimed for the earlier timeout.
+
+The successful run completed normal archive and storage cleanup. Independent
+read-only checks confirmed every owned Project, CredentialProfile, Workspace,
+PVC and Pod was absent. Existing user workspaces were unchanged by this test.
+This completes the previously pending real-provider replay for #77; it does not
+qualify EKS or a different release artifact.
