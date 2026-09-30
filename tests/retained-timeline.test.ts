@@ -5,6 +5,9 @@ import {
   SessionOutboundMessageSchema,
 } from "@getpaseo/protocol/messages";
 import { describe, expect, it } from "vitest";
+import { WorkspaceController } from "../src/controller/controller.js";
+import { historyReaderName } from "../src/controller/resources.js";
+import { WORKSPACE_UID_LABEL } from "../src/domain.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { archiveAgentInventory } from "../src/gateway/agent-inventory.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
@@ -46,6 +49,7 @@ const agent = AgentSnapshotPayloadSchema.parse({
 async function fixture() {
   const store = new MemoryStore();
   const row = workspace("one");
+  row.metadata.uid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const records = new MemoryRecordStore();
   const routing = new AgentRouting(new AgentIdentityRegistry(records));
   const backend: Backend = {
@@ -91,6 +95,7 @@ async function fixture() {
   const session = new GatewaySession({
     store,
     inventoryStore: records,
+    retainedHistoryImage: "paseo-workspace:test",
     agentRouting: routing,
     namespace: "test",
     backendPassword: "fixture",
@@ -112,6 +117,20 @@ async function request(f: Awaited<ReturnType<typeof fixture>>, message: SessionI
   await f.session.handle(message);
   return f.output.slice(before).map((value) => SessionOutboundMessageSchema.parse(value));
 }
+async function historyReceipt(f: Awaited<ReturnType<typeof fixture>>) {
+  await f.records.createRecord({
+    kind: "retained-history",
+    id: f.row.metadata.uid ?? "",
+    value: {
+      workspaceId: f.row.metadata.name,
+      workspaceUid: f.row.metadata.uid,
+      workspaceGeneration: 1,
+      capturedAt: stamp,
+      fileName:
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-1-1790208000000-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.json",
+    },
+  });
+}
 
 function replaceFirstWorkspaceUid(store: MemoryStore) {
   const first = store.workspaceRows[0];
@@ -120,6 +139,246 @@ function replaceFirstWorkspaceUid(store: MemoryStore) {
 }
 
 describe("retained timeline opening", () => {
+  it("does not start a helper when the session closes during receipt lookup", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = f.records.record.bind(f.records);
+    Object.assign(f.records, {
+      async record(kind: string, id: string) {
+        if (kind === "retained-history") {
+          entered();
+          await pending;
+        }
+        return original(kind, id);
+      },
+    });
+    let reads = 0;
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        reads++;
+        return { found: false };
+      },
+    });
+    const work = request(f, {
+      type: "fetch_agent_timeline_request",
+      requestId: "closing",
+      agentId,
+      direction: "tail",
+    });
+    await started;
+    await f.session.close();
+    release();
+    await work;
+    expect(reads).toBe(0);
+    expect(
+      f.output.some((item) => (item as { type?: string }).type === "fetch_agent_timeline_response"),
+    ).toBe(false);
+  });
+  it("serves an uncached retained page without opening a daemon", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    let reads = 0;
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        reads++;
+        return {
+          found: true,
+          workspaceGeneration: 1,
+          capturedAt: stamp,
+          history: {
+            epoch: "retained-epoch",
+            window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+            entries: [
+              {
+                provider: "claude",
+                item: { type: "assistant_message", text: "saved result" },
+                timestamp: stamp,
+                seqStart: 1,
+                seqEnd: 1,
+                sourceSeqRanges: [{ startSeq: 1, endSeq: 1 }],
+                collapsed: [],
+              },
+            ],
+            truncated: false,
+          },
+        };
+      },
+    });
+    try {
+      const replies = await request(f, {
+        type: "fetch_agent_timeline_request",
+        requestId: "saved",
+        agentId,
+        direction: "tail",
+        projection: "projected",
+      });
+      expect(replies).toContainEqual(
+        expect.objectContaining({
+          type: "fetch_agent_timeline_response",
+          payload: expect.objectContaining({
+            requestId: "saved",
+            error: null,
+            entries: [
+              expect.objectContaining({
+                item: { type: "assistant_message", text: "saved result" },
+              }),
+            ],
+          }),
+        }),
+      );
+      expect(reads).toBe(1);
+      expect(f.backendOpened()).toBe(0);
+      expect(f.store.workspaceRows[0]?.spec.residency).toBe("Suspended");
+    } finally {
+      await f.session.close();
+    }
+  });
+  it("keeps a completed stopped phase while a retained read and controller reconcile overlap", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: (value: unknown) => void;
+    const reading = new Promise<unknown>((resolve) => {
+      finish = resolve;
+    });
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        entered();
+        return reading;
+      },
+    });
+    f.store.objects.set(`Pod/${historyReaderName(f.row)}`, {
+      kind: "Pod",
+      metadata: {
+        name: historyReaderName(f.row),
+        uid: "reader-uid",
+        labels: { [WORKSPACE_UID_LABEL]: f.row.metadata.uid ?? "" },
+      },
+    });
+    const work = request(f, {
+      type: "fetch_agent_timeline_request",
+      requestId: "overlap",
+      agentId,
+      direction: "tail",
+      projection: "projected",
+    });
+    try {
+      await started;
+      await new WorkspaceController(f.store, {
+        workspaceImage: "paseo:test",
+        storageSize: "5Gi",
+        backendSecret: "paseo-backend",
+        imagePullPolicy: "Never",
+      }).reconcile(f.row, f.store.projectRows);
+      expect(f.row.status?.phase).toBe("Suspended");
+      finish({
+        found: true,
+        workspaceGeneration: 1,
+        capturedAt: stamp,
+        history: {
+          epoch: "retained-epoch",
+          window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+          entries: [
+            {
+              provider: "claude",
+              item: { type: "assistant_message", text: "saved result" },
+              timestamp: stamp,
+              seqStart: 1,
+              seqEnd: 1,
+              sourceSeqRanges: [{ startSeq: 1, endSeq: 1 }],
+              collapsed: [],
+            },
+          ],
+          truncated: false,
+        },
+      });
+      const replies = await work;
+      expect(replies).toContainEqual(
+        expect.objectContaining({
+          type: "fetch_agent_timeline_response",
+          payload: expect.objectContaining({ requestId: "overlap", error: null }),
+        }),
+      );
+      expect(replies).not.toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+      expect(f.backendOpened()).toBe(0);
+    } finally {
+      finish({ found: false });
+      await work;
+      await f.session.close();
+    }
+  });
+
+  it("rejects a resume and re-suspend of the same UID during PVC reading", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        const row = f.store.workspaceRows[0];
+        if (row) row.metadata.resourceVersion = "2";
+        return { found: false };
+      },
+    });
+    try {
+      const replies = await request(f, {
+        type: "fetch_agent_timeline_request",
+        requestId: "aba",
+        agentId,
+        direction: "tail",
+      });
+      expect(replies).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+      expect(f.backendOpened()).toBe(0);
+    } finally {
+      await f.session.close();
+    }
+  });
+
+  it("does not present a snapshot from an earlier stop as current history", async () => {
+    const f = await fixture();
+    await historyReceipt(f);
+    Object.assign(f.store, {
+      async readRetainedHistory() {
+        return {
+          found: true,
+          workspaceGeneration: 0,
+          capturedAt: stamp,
+          history: {
+            epoch: "old",
+            window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+            entries: [],
+            truncated: true,
+          },
+        };
+      },
+    });
+    try {
+      const replies = await request(f, {
+        type: "fetch_agent_timeline_request",
+        requestId: "stale",
+        agentId,
+      });
+      expect(replies).toContainEqual(
+        expect.objectContaining({
+          type: "fetch_agent_timeline_response",
+          payload: expect.objectContaining({
+            error: expect.stringMatching(/earlier workspace residency/i),
+          }),
+        }),
+      );
+    } finally {
+      await f.session.close();
+    }
+  });
   it("acknowledges an authorized closed agent without starting its workspace", async () => {
     const f = await fixture();
     try {

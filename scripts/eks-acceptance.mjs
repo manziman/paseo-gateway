@@ -3,16 +3,20 @@
 import { readFileSync } from "node:fs";
 
 export const required = [
+  "install.crd-and-serviceaccount-rbac",
   "install.digest-and-pull",
   "install.pvc-encryption",
+  "install.rwop-claim",
   "transport.gateway-tls",
   "transport.backend-tls",
+  "transport.certificate-identity",
   "workflow.private-orchestrator-worker",
   "workflow.provider-catalog",
   "network.allowed",
   "network.cross-workspace-denied",
   "network.disallowed-egress-denied",
   "network.metadata-denied",
+  "network.startup-enforcement",
   "recovery.workspace-pvc-identity-history",
   "recovery.gateway-generation",
   "recovery.suspend-resume",

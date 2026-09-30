@@ -23,8 +23,9 @@ instance a separate `PASEO_HOME` and disable built-in daemon management before
 launch. The [upstream packaged-app smoke test](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/e2e/packaged-app-smoke.js#L132)
 uses these isolation hooks; [Desktop applies the user-data override](https://github.com/getpaseo/paseo/blob/81865852011df86aa0ad0ae411cb2f5e4078153f/packages/desktop/src/main.ts#L299)
 before its single-instance lock. The installed 0.9.2 bundle was also checked for
-these branches. This recipe is source-verified; its actual fresh-client launch
-and cold-project flow still require acceptance.
+these branches. On 2026-09-30, the same isolation hooks in Desktop 0.10.2 passed
+the fresh-client launch and cold-project flow; see the
+[versioned evidence](local-parity-qualification.md#fresh-desktop-catalog-and-branch-selection--2026-09-30).
 
 ```sh
 umask 077
@@ -76,8 +77,16 @@ markers correctly when switching between them. A text file uploaded through the
 desktop attachment control was read by the agent with matching contents. After
 the #73 routing fix, the operator also opened an agent-generated file through
 its chat link and confirmed the contents matched. These
-results do not complete the remaining checklist or the fresh-preference,
-zero-Ready cold-start scenario.
+results do not complete the remaining checklist. The separate fresh-preference,
+zero-Ready cold-start scenario subsequently passed on 2026-09-30, including
+nondefault branch selection and automatic first-turn activity. Its observed
+discovery delays are recorded separately from functional success.
+
+On 2026-09-30, the operator also opened a newly captured stopped conversation in
+the fresh Desktop 0.10.2 profile and confirmed its saved prompt, command activity
+and exact reply without resuming or resending. The workspace remained Suspended
+with the same UID. This completes the manual stopped-history check for the
+recorded candidate; older uncaptured histories retain the documented limits.
 
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.
 
@@ -103,16 +112,13 @@ does not qualify this handoff (tracked in #71). A saved provider preference or a
 workspace invalidates this cold-start check. It is tracked in
 [#65](https://github.com/manziman/paseo-gateway/issues/65).
 
-Until that check passes, a manual workaround is to submit a **blank** New
-Workspace Chat composer, wait for its workspace to become Ready, then select
-the provider and create Chat **inside that same workspace**. Launching a blank
-Terminal can also create a workspace without selecting a provider. Neither
-path verifies the first prompted Chat flow or repairs project-scoped provider
-discovery on the New Workspace screen.
+Do not substitute a blank workspace or Terminal launch for this acceptance
+case: those paths do not verify the first prompted Chat flow. On a failure,
+record the exact stage and inspect the created agent before resending anything.
 
 1. **Connection and projects:** Connect, select the gateway host, and confirm its project list. Disconnect/reconnect once and verify the same host and projects reappear. Check that an incorrect password is rejected, then restore the correct one.
 2. **Two-workspace isolation and live activity:** Create two test workspaces in the authorized project. Start one agent in each with distinct short prompts. Verify each conversation and workspace shows only its own prompt, reply, and status. In an existing chat, send a second harmless prompt such as `Run pwd once, then reply STREAM-OK`. Without refreshing or fetching history, verify tool activity and the final reply appear and the running state clears. Reasoning widgets depend on whether the provider emits reasoning; their absence alone is not a failure. Switch between the two chats and verify live activity stays with the selected agent. Note the provider and any error displayed; do not copy credential details into evidence. Missing live events despite completed stored history is tracked in [#69](https://github.com/manziman/paseo-gateway/issues/69).
-3. **History after reconnect:** Close and reopen the desktop while the agents are idle. Reconnect to the gateway host. Both completed conversations should retain their exact user/assistant turn counts, with no duplicate prompt. If a controlled gateway replacement is coordinated, repeat this check afterward; do not resend an uncertain prompt merely because the connection dropped.
+3. **History after reconnect:** For stopped-history acceptance, first complete a short conversation using the candidate workspace image, then coordinate its suspension and confirm the snapshot receipt exists and the daemon Pod is absent. Open it from a fresh Desktop preference profile: the saved messages must appear without resuming the workspace or resending a prompt. A previously cached chat alone does not prove this path. See [retained history](retained-history.md) for old-image migration and truncation limits. Separately, close and reopen the desktop while the agents are idle. Reconnect to the gateway host. Both completed conversations should retain their exact user/assistant turn counts, with no duplicate prompt. If a controlled gateway replacement is coordinated, repeat this check afterward; do not resend an uncertain prompt merely because the connection dropped.
 4. **Files and terminal:** Where the desktop exposes them, attach a small non-sensitive text file to one agent and verify its content in that workspace. Download or open a generated file if the UI offers it. In each workspace terminal, print a different marker and verify the output stays in the correct tab/workspace. Record an unavailable control as **BLOCKED/not exposed**.
 5. **Labels, suspended inventory, and permissions:** If label controls are visible, assign a unique test label to one workspace and check it survives reconnect. Inspect any already-suspended test workspace: retained agents should appear as unavailable/closed, not as a falsely empty workspace. If an agent actually asks for permission, resolve it in the intended workspace and verify the other workspace is unaffected. Do not force a destructive action to manufacture a prompt.
 6. **New-agent schedule:** Open **Schedules** from the sidebar. Create a small **new-agent** schedule for the authorized test project and provider, choosing a cadence whose next automatic run is after this test. Verify its name, cadence, and status in the list. Edit its cadence, pause and resume it, use **Run now** once, and verify exactly one new agent/turn and the row's last-run time. Delete the schedule after recording the result.

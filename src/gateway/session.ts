@@ -51,6 +51,11 @@ import { normalizeProjectBranchName } from "./project-ref-selection.js";
 import type { ProjectRefInspector, ProjectRefQuery } from "./project-refs.js";
 import { projectForCatalogPath } from "./provider-catalog.js";
 import type { ProviderCatalog } from "./provider-catalog-service.js";
+import {
+  RetainedAgentHistorySchema,
+  readRetainedHistoryReceipt,
+  retainedHistoryPage,
+} from "./retained-history.js";
 import { type JsonObject, object, selectWorkspace, TerminalSlots, translate } from "./routing.js";
 import type { GatewayRuntime } from "./runtime-status.js";
 import { UploadStaging } from "./uploads.js";
@@ -118,6 +123,8 @@ export interface SessionOptions {
   providerReadyPollMs?: number;
   runtime?: GatewayRuntime;
   inventoryStore?: RecordStore;
+  /** Immutable PVC reader image; old snapshots remain explicitly unavailable. */
+  retainedHistoryImage?: string;
   agentRouting?: AgentRouting;
   labels?: WorkspaceLabels;
   downloadHandles?: DownloadHandles;
@@ -429,6 +436,7 @@ export class GatewaySession {
     if (
       !current ||
       current.metadata.uid !== workspace.metadata.uid ||
+      current.metadata.resourceVersion !== workspace.metadata.resourceVersion ||
       current.spec.projectRef !== workspace.spec.projectRef ||
       current.spec.credentialProfile !== workspace.spec.credentialProfile ||
       current.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
@@ -593,6 +601,29 @@ export class GatewaySession {
     });
   }
 
+  private async retainedBound<T>(deadlineAt: number, run: () => Promise<T>): Promise<T> {
+    if (this.closed || Date.now() >= deadlineAt)
+      throw new Error("Retained timeline request expired or session closed");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        this.sessionBound(run),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("Retained timeline request deadline exceeded")),
+            deadlineAt - Date.now(),
+          );
+          timer.unref();
+        }),
+      ]);
+      if (this.closed || Date.now() >= deadlineAt)
+        throw new Error("Retained timeline request expired or session closed");
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private projectFor(workspace: Workspace, projects: Project[]) {
     const project = projects.find((p) => p.metadata.name === workspace.spec.projectRef);
     if (!project) throw new Error("Workspace project no longer exists");
@@ -747,7 +778,11 @@ export class GatewaySession {
   private async dispatch(message: SessionInboundMessage, checkoutDeadline?: number) {
     const record = object(message);
     const requestId = typeof record.requestId === "string" ? record.requestId : "";
-    const { projects, workspaces } = await this.records();
+    const timelineDeadline =
+      message.type === "fetch_agent_timeline_request" ? Date.now() + 45000 : undefined;
+    const { projects, workspaces } = timelineDeadline
+      ? await this.retainedBound(timelineDeadline, () => this.records())
+      : await this.records();
     if (message.type === "file.upload.request") {
       this.uploads.begin(message);
       return;
@@ -1338,8 +1373,12 @@ export class GatewaySession {
       message.type === "fetch_agent_timeline_request" &&
       (this.options.agentRouting || message.agentId.includes("~"))
     ) {
-      const resolved = this.options.agentRouting
-        ? await this.options.agentRouting.resolveAgent(message.agentId, workspaces)
+      const deadlineAt = timelineDeadline ?? Date.now() + 45000;
+      const routing = this.options.agentRouting;
+      const resolved = routing
+        ? await this.retainedBound(deadlineAt, () =>
+            routing.resolveAgent(message.agentId, workspaces),
+          )
         : undefined;
       const route = resolved
         ? { workspaceId: resolved.workspace.metadata.name, backendId: resolved.backendAgentId }
@@ -1347,32 +1386,87 @@ export class GatewaySession {
       const workspace = workspaces.find((row) => row.metadata.name === route.workspaceId);
       if (!workspace) throw new Error("Timeline workspace access denied or identity changed");
       if (workspace.spec.residency !== "Running") {
-        const agent = await this.retainedTimelineAgent(
-          workspace,
-          this.options.agentRouting ? route.backendId : message.agentId,
+        const agent = await this.retainedBound(deadlineAt, () =>
+          this.retainedTimelineAgent(
+            workspace,
+            this.options.agentRouting ? route.backendId : message.agentId,
+          ),
         );
+        let history: z.infer<typeof RetainedAgentHistorySchema> | undefined;
+        let historyError: string | undefined;
+        const inventoryStore = this.options.inventoryStore;
+        const receipt = inventoryStore
+          ? await this.retainedBound(deadlineAt, () =>
+              readRetainedHistoryReceipt(inventoryStore, workspace),
+            )
+          : undefined;
+        const readRetainedHistory = this.options.store.readRetainedHistory?.bind(
+          this.options.store,
+        );
+        const retainedHistoryImage = this.options.retainedHistoryImage;
+        if (
+          receipt &&
+          workspace.spec.retentionPolicy?.storage !== "Ephemeral" &&
+          retainedHistoryImage &&
+          readRetainedHistory
+        ) {
+          try {
+            const result = z
+              .discriminatedUnion("found", [
+                z.object({ found: z.literal(false) }),
+                z.object({
+                  found: z.literal(true),
+                  history: RetainedAgentHistorySchema,
+                  workspaceGeneration: z.number().int().nonnegative(),
+                  capturedAt: z.string(),
+                }),
+              ])
+              .parse(
+                await this.retainedBound(deadlineAt, () =>
+                  readRetainedHistory(
+                    workspace,
+                    route.backendId,
+                    retainedHistoryImage,
+                    receipt.fileName,
+                    deadlineAt,
+                    this.closeController.signal,
+                  ),
+                ),
+              );
+            if (result.found) {
+              if (
+                result.workspaceGeneration !== workspace.metadata.generation ||
+                result.capturedAt !== receipt.capturedAt
+              )
+                historyError =
+                  "Retained transcript snapshot belongs to an earlier workspace residency";
+              else history = result.history;
+            }
+          } catch {
+            if (this.closed || Date.now() >= deadlineAt)
+              throw new Error("Retained timeline request expired or session closed");
+            historyError = "Retained transcript could not be read from owned storage";
+          }
+        }
+        // The original resourceVersion catches a resume→suspend ABA of the
+        // same UID; retainedTimelineAgent also checks principal and route.
+        await this.retainedBound(deadlineAt, () =>
+          this.retainedTimelineAgent(
+            workspace,
+            this.options.agentRouting ? route.backendId : message.agentId,
+          ),
+        );
+        if (this.closed) throw new Error("Gateway session closed");
+        const response = retainedHistoryPage(message, agent, history);
         this.options.emit({
-          type: "fetch_agent_timeline_response",
+          ...response,
           payload: {
-            requestId,
-            agentId: message.agentId,
-            agent,
-            direction: message.direction ?? "tail",
-            projection: message.projection ?? "projected",
-            epoch: "",
-            reset: false,
-            staleCursor: false,
-            gap: false,
-            window: { minSeq: 0, maxSeq: 0, nextSeq: 0 },
-            startCursor: null,
-            endCursor: null,
-            hasOlder: false,
-            hasNewer: false,
-            entries: [],
+            ...response.payload,
             error:
-              workspace.spec.retentionPolicy?.storage === "Ephemeral"
+              historyError ??
+              (workspace.spec.retentionPolicy?.storage === "Ephemeral"
                 ? "Workspace is stopped; ephemeral storage was released and retained metadata has no transcript"
-                : "Workspace is stopped; transcript is unavailable while compute is stopped, and retained metadata has no history",
+                : response.payload.error),
           },
         });
         return;
@@ -1664,6 +1758,7 @@ export class GatewaySession {
   private async forward(message: SessionInboundMessage, workspace: Workspace) {
     const validate = async () => {
       const { workspaces } = await this.records();
+      if (this.closed) throw new Error("Gateway session closed");
       const current = workspaces.find((row) => row.metadata.name === workspace.metadata.name);
       if (
         !current ||
@@ -1710,6 +1805,8 @@ export class GatewaySession {
       typeof input.requestId !== "string"
     ) {
       // Here requestId identifies a permission prompt; upstream sends no RPC ack.
+      if (this.closed || this.closeController.signal.aborted)
+        throw new Error("Gateway session closed");
       connection.backend.send(input);
       return;
     }

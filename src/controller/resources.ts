@@ -31,6 +31,88 @@ export function resourceName(workspace: Workspace): string {
     .digest("hex")
     .slice(0, 24)}`;
 }
+export function historyReaderName(workspace: Workspace): string {
+  if (!workspace.metadata.uid) throw new Error("Workspace UID required for history reader");
+  return `rh-${createHash("sha256").update(workspace.metadata.uid).digest("hex").slice(0, 24)}`;
+}
+
+/** No daemon, credential profile, Service, token, or writable mount is present. */
+export function desiredHistoryReader(
+  workspace: Workspace,
+  image: string,
+  namespace: string,
+): V1Pod {
+  const uid = workspace.metadata.uid;
+  if (!uid) throw new Error("Workspace UID required for history reader");
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: {
+      name: historyReaderName(workspace),
+      namespace,
+      labels: {
+        "app.kubernetes.io/managed-by": MANAGED_BY,
+        "app.kubernetes.io/component": "history-reader",
+        [WORKSPACE_UID_LABEL]: uid,
+      },
+      ownerReferences: [
+        {
+          apiVersion: workspace.apiVersion,
+          kind: workspace.kind,
+          name: workspace.metadata.name,
+          uid,
+          controller: true,
+          blockOwnerDeletion: false,
+        },
+      ],
+    },
+    spec: {
+      automountServiceAccountToken: false,
+      enableServiceLinks: false,
+      restartPolicy: "Never",
+      activeDeadlineSeconds: 90,
+      terminationGracePeriodSeconds: 1,
+      securityContext: {
+        runAsNonRoot: true,
+        runAsUser: 1000,
+        runAsGroup: 1000,
+        seccompProfile: { type: "RuntimeDefault" },
+      },
+      containers: [
+        {
+          name: "reader",
+          image,
+          imagePullPolicy: "IfNotPresent",
+          command: ["node", "-e", "setTimeout(() => {}, 80000)"],
+          securityContext: {
+            allowPrivilegeEscalation: false,
+            readOnlyRootFilesystem: true,
+            capabilities: { drop: ["ALL"] },
+          },
+          resources: {
+            requests: { cpu: "10m", memory: "32Mi" },
+            limits: { cpu: "200m", memory: "128Mi" },
+          },
+          env: [{ name: "PASEO_RETAINED_HISTORY_ROOT", value: "/history" }],
+          volumeMounts: [
+            {
+              name: "data",
+              mountPath: "/history",
+              subPath: "home/.paseo/gateway-history",
+              readOnly: true,
+            },
+          ],
+        },
+      ],
+      volumes: [
+        {
+          name: "data",
+          persistentVolumeClaim: { claimName: resourceName(workspace), readOnly: true },
+        },
+      ],
+    },
+  };
+}
 
 /** Resources are deterministic; PVCs deliberately have no owner reference so deletion retains data. */
 export function desiredResources(

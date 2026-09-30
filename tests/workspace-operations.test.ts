@@ -410,6 +410,58 @@ describe("cluster workspace lifecycle", () => {
     expect(store.workspaceRows[0]?.spec.residency).toBe("Archived");
     expect(workspacePath("one")).toBe("/workspaces/one");
   });
+
+  it("refuses to archive when a concurrent spec update changes the predicted history generation", async () => {
+    const { service, store } = setup();
+    store.workspaceRows = [workspace()];
+    const status = store.status.bind(store);
+    store.status = async (row, next) => {
+      await status(row, next);
+      const current = store.workspaceRows.find(
+        (entry) => entry.metadata.name === row.metadata.name,
+      );
+      if (current) current.metadata.generation = 2;
+    };
+    await expect(service.archive("one", { kind: "owner" })).rejects.toThrow(
+      "Workspace changed during archive",
+    );
+    expect(store.workspaceRows[0]?.spec.residency).toBe("Running");
+  });
+
+  it("prunes an old committed receipt before writing when the file budget was exhausted", async () => {
+    const { service, store } = setup();
+    const row = workspace();
+    row.metadata.uid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    store.workspaceRows = [row];
+    const previous = `${row.metadata.uid}-1-1790208000000-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.json`;
+    await store.createRecord({
+      kind: "retained-history",
+      id: row.metadata.uid,
+      value: {
+        workspaceId: row.metadata.name,
+        workspaceUid: row.metadata.uid,
+        workspaceGeneration: 1,
+        capturedAt: "2026-09-24T00:00:00Z",
+        fileName: previous,
+      },
+    });
+    const calls: string[] = [];
+    Object.assign(store, {
+      async supportsRetainedHistory() {
+        return true;
+      },
+      async pruneRetainedHistory(_workspace: Workspace, keep?: string) {
+        calls.push(`prune:${keep}`);
+      },
+      async writeRetainedHistory() {
+        expect(calls).toEqual([`prune:${previous}`]);
+        calls.push("write");
+        return `${row.metadata.uid}-1-1790294400000-cccccccc-cccc-4ccc-8ccc-cccccccccccc.json`;
+      },
+    });
+    await service.snapshotSuspendedInventory(row);
+    expect(calls).toEqual([`prune:${previous}`, "write", expect.stringMatching(/^prune:/)]);
+  });
 });
 
 // Exercise the durable protocol independently of Kubernetes scheduling latency.

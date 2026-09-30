@@ -10,10 +10,12 @@ import { scopedId } from "../src/domain.js";
 import { AgentIdentityRegistry } from "../src/gateway/agent-identity.js";
 import { AgentRouting } from "../src/gateway/agent-routing.js";
 import { PaseoBackend } from "../src/gateway/backend.js";
+import { captureRetainedHistory } from "../src/gateway/retained-history.js";
 import { startGateway } from "../src/gateway/server.js";
 import { WorkspaceOperations } from "../src/gateway/workspace-operations.js";
 import { MemoryStore, workspace } from "../tests/fixtures.js";
 import { MemoryRecordStore } from "../tests/record-store.js";
+import { lostAckProxy } from "./lost-ack-proxy.js";
 import { reportUpstreamFailure } from "./upstream-diagnostics.js";
 
 // This contract test owns every container/volume it creates. It never touches a running user daemon.
@@ -73,6 +75,14 @@ async function startDaemon(id: string) {
   docker(
     "run",
     "--detach",
+    "--memory",
+    "1g",
+    "--memory-swap",
+    "1g",
+    "--cpus",
+    "1",
+    "--pids-limit",
+    "256",
     "--name",
     name,
     "--user",
@@ -134,8 +144,15 @@ const store = Object.assign(new MemoryStore(), {
   deleteRecord: identityRecords.deleteRecord.bind(identityRecords),
 });
 store.workspaceRows = [workspace("one"), workspace("two")];
+const ownedUid = randomUUID();
+const ownedOne = store.workspaceRows.find((row) => row.metadata.name === "one");
+if (!ownedOne) throw new Error("Missing owned fixture workspace");
+ownedOne.metadata.uid = ownedUid;
 let nativeCreations = 0;
 let operations: WorkspaceOperations | undefined;
+let faultProxy: Awaited<ReturnType<typeof lostAckProxy>> | undefined;
+const backendUrl = (id: string) =>
+  id === "one" && faultProxy ? faultProxy.url : `ws://127.0.0.1:${ports.get(id)}/ws`;
 async function connectGateway() {
   const agentRouting = new AgentRouting(new AgentIdentityRegistry(identityRecords));
   operations = new WorkspaceOperations({
@@ -146,7 +163,7 @@ async function connectGateway() {
     admission: new WorkspaceAdmission(store, 10),
     backendFactory: (row, emit) => {
       const backend = new PaseoBackend(
-        `ws://127.0.0.1:${ports.get(row.metadata.name)}/ws`,
+        backendUrl(row.metadata.name),
         password,
         { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
         emit,
@@ -183,7 +200,7 @@ async function connectGateway() {
     },
     backendFactory: (row, onMessage, onBinary, onDisconnect) => {
       const backend = new PaseoBackend(
-        `ws://127.0.0.1:${ports.get(row.metadata.name)}/ws`,
+        backendUrl(row.metadata.name),
         password,
         {
           type: "hello",
@@ -417,6 +434,67 @@ try {
     firstTimelineEvents.includes("timeline:user_message"),
     "Native user timeline item must reach the subscribed SDK",
   );
+  const historyBackend = new PaseoBackend(
+    `ws://127.0.0.1:${ports.get("one")}/ws`,
+    password,
+    { type: "hello", clientId: randomUUID(), clientType: "cli", protocolVersion: 1 },
+    () => {},
+    () => {},
+    () => {},
+  );
+  await historyBackend.connect();
+  try {
+    const source = store.workspaceRows.find((row) => row.metadata.name === "one");
+    if (!source) throw new Error("Owned native workspace is missing");
+    const captured = await captureRetainedHistory(historyBackend, source);
+    assert.ok(
+      captured.agents[created.id]?.entries.some((entry) => entry.item.type === "user_message"),
+      "The unmodified daemon must supply a projected user timeline for PVC retention",
+    );
+    const nativeName = `${prefix}-one`;
+    const command = [
+      "exec",
+      "--user",
+      "1000:1000",
+      "--env",
+      "PASEO_RETAINED_HISTORY_ROOT=/home/paseo/.paseo/gateway-history",
+      nativeName,
+      "node",
+      "/opt/paseo/retained-history.mjs",
+    ];
+    // docker exec closes stdin unless --interactive is set, even when
+    // execFileSync supplies input. The read path needs no stdin forwarding.
+    const filename = execFileSync(
+      "docker",
+      ["exec", "--interactive", ...command.slice(1), "write", ownedUid],
+      {
+        input: Buffer.from(JSON.stringify(captured)),
+        encoding: "utf8",
+        env: { ...process.env, PASEO_PASSWORD: password },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    ).trim();
+    const nativePage = JSON.parse(
+      docker(
+        ...command,
+        "read",
+        ownedUid,
+        created.id,
+        String(captured.workspaceGeneration),
+        filename,
+      ),
+    );
+    assert.equal(nativePage.found, true);
+    assert.ok(
+      nativePage.history.entries.some(
+        (entry: { item: { type: string } }) => entry.item.type === "user_message",
+      ),
+      "The new image must write and read native projected history from its owned home",
+    );
+  } finally {
+    await historyBackend.close();
+  }
+  console.log("PASS: unmodified daemon supplies bounded projected timeline pages for retention.");
   assert.equal(
     nativeUploads.length,
     1,
@@ -448,7 +526,7 @@ try {
     projectId: "example",
     credentialProfile: "claude-default",
     workspaceId: "one",
-    workspaceUid: "uid-one",
+    workspaceUid: ownedUid,
   });
   assert.match(secondAgent.id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   const agents = await active.fetchAgents();
@@ -563,10 +641,106 @@ try {
   console.log(
     "PASS: native HTTP download, two-Pod late-bound uploads, path isolation, single-use handles, and gateway-replacement recovery.",
   );
+  // Drop an actual native success before the gateway can observe it. A reconnect
+  // must inspect durable state, never turn an unknown outcome into an automatic retry.
+  await active.close();
+  await gateway?.close();
+  faultProxy = await lostAckProxy(`ws://127.0.0.1:${ports.get("one")}/ws`);
+  active = await connectGateway();
+  await active.fetchAgents();
+  const unknownOutcome = /(?:outcome may be unknown.*|reconnect and )inspect before retrying/i;
+  const title = `lost-ack-${randomUUID()}`;
+  const lostCreate = faultProxy.arm("agent.create.request", "agent.create.response");
+  const createOptions = {
+    config: { provider: "claude" as const, cwd: "/workspaces/one", title },
+    workspaceId: "one",
+    idempotencyKey: `${prefix}-lost-create`,
+  };
+  await Promise.all([
+    assert.rejects(active.createAgent(createOptions), unknownOutcome),
+    lostCreate.acknowledged.then((payload) => {
+      assert.ok(payload.agent);
+      console.log("Native create acknowledgement observed and dropped.");
+    }),
+  ]);
+  await active.close();
+  await gateway?.close();
+  active = await connectGateway();
+  const inspected = await active.fetchAgents();
+  const matching = inspected.entries.filter((entry) => entry.agent.title === title);
+  assert.equal(matching.length, 1, "Accepted native creation survives its lost acknowledgement");
+  assert.equal(lostCreate.dispatches(), 1, "Reconnect must not replay creation");
+  await assert.rejects(active.createAgent(createOptions), unknownOutcome);
+  assert.equal(
+    lostCreate.dispatches(),
+    1,
+    "Durable failed journal must not redispatch ambiguous creation",
+  );
+  const lostAgent = matching[0]?.agent;
+  assert.ok(lostAgent);
+
+  const marker = `lost-ack-message-${randomUUID()}`;
+  const messageId = randomUUID();
+  const lostSend = faultProxy.arm("send_agent_message_request", "send_agent_message_response");
+  await Promise.all([
+    assert.rejects(active.sendAgentMessage(lostAgent.id, marker, { messageId }), unknownOutcome),
+    lostSend.acknowledged.then((payload) => assert.equal(payload.accepted, true)),
+  ]);
+  await active.close();
+  await gateway?.close();
+  active = await connectGateway();
+  const timeline = await active.fetchAgentTimeline(lostAgent.id);
+  assert.equal(
+    timeline.entries.filter(
+      (entry) => entry.item.type === "user_message" && entry.item.messageId === messageId,
+    ).length,
+    1,
+  );
+  assert.equal(lostSend.dispatches(), 1, "Reconnect must not replay an accepted prompt");
+
+  const original = await active.readFile("/workspaces/one", "marker.txt");
+  const lostWrite = faultProxy.arm("fs.file.write.request", "fs.file.write.response");
+  const writtenText = `lost-ack-file-${randomUUID()}`;
+  await Promise.all([
+    assert.rejects(
+      active.writeFile({
+        cwd: "/workspaces/one",
+        path: "marker.txt",
+        content: writtenText,
+        expectedModifiedAt: original.modifiedAt,
+        expectedRevision: original.revision,
+      }),
+      unknownOutcome,
+    ),
+    lostWrite.acknowledged.then((payload) =>
+      assert.equal((payload.result as { status: string }).status, "written"),
+    ),
+  ]);
+  await active.close();
+  await gateway?.close();
+  active = await connectGateway();
+  const inspectedFile = await active.readFile("/workspaces/one", "marker.txt");
+  assert.equal(inspectedFile.kind, "text");
+  if (inspectedFile.kind === "text")
+    assert.equal(Buffer.from(inspectedFile.bytes).toString(), writtenText);
+  assert.equal(lostWrite.dispatches(), 1, "Reconnect must not replay an accepted file write");
+  // Restore the existing contract marker explicitly after inspection, outside the fault.
+  await active.writeFile({
+    cwd: "/workspaces/one",
+    path: "marker.txt",
+    content: "one",
+    expectedModifiedAt: inspectedFile.modifiedAt,
+    expectedRevision: inspectedFile.revision,
+  });
+  console.log(
+    "PASS: native accepted create, prompt, and file write survive lost acknowledgements; explicit unknown outcomes and no replay across replacement.",
+  );
   await active.close();
   await gateway?.close();
   gateway = undefined;
   client = undefined;
+  await faultProxy.close();
+  faultProxy = undefined;
   docker("rm", "--force", `${prefix}-one`);
   // Reproduce an interrupted PID-lock write after disk exhaustion, with no live writer.
   docker(
@@ -597,6 +771,7 @@ try {
   globalThis.fetch = nativeFetch;
   await client?.close();
   await gateway?.close();
+  await faultProxy?.close();
   for (const name of containers) {
     try {
       docker("rm", "--force", name);

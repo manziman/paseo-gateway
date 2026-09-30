@@ -60,8 +60,10 @@ exact image digest, counters, CPU time and result. Deadline, invalid output,
 unsupported runtime and missing prerequisites are failures, never passes. Cleanup
 checks the invocation's unique container label before removing any survivor.
 
-This regression is deliberately opt-in and Linux-arm64-specific; it is not a
-portable timing/RSS assertion in ordinary CI. On the initial command-only
+This regression is Linux-arm64-specific; it is not a portable timing/RSS
+assertion in ordinary CI. The release native ARM64 gate runs it against the
+exact pulled gateway digest before signing, and includes the report in
+`native-arm64-verification.json`. Local execution remains opt-in. On the initial command-only
 candidate, it passed at 357,650,432 bytes peak RSS, with 100,000 validations in
 692 ms (588 ms user CPU, 83 ms system CPU). The same candidate without the flag
 reproduced a cgroup OOM at 1,089,622,016 bytes sampled RSS. Those measurements

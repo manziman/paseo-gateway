@@ -1,5 +1,22 @@
 # Local parity qualification (partial)
 
+This document is a chronological evidence log, not a claim that every historical
+candidate passed. Later sections supersede earlier pending observations only for
+the explicitly repeated checks and recorded images. Current pre-EKS status:
+
+| Area | Latest local status |
+| --- | --- |
+| Claude/Codex/OpenCode prompts and idle/active gateway recovery | Passed on the recorded development candidates; exact release artifacts remain separate |
+| GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
+| Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
+| Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
+| Scoped CLI permission resolution | Pinned CLI contract and real two-workspace denial/approval replay passed (#77) |
+| Fresh-preference zero-Ready Desktop/ref picker | Passed in Desktop 0.10.2; cold discovery delays recorded separately (#65/#67) |
+| Stopped uncached transcript | Native snapshot contracts, repeated live SDK reads and fresh-profile Desktop viewing passed on the recorded candidates (#76) |
+| Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
+| Gateway memory | Targeted reproduction/mitigation and 80-minute process-age observation passed, with a recorded host-sleep sampling gap |
+| EKS CSI, network enforcement, node-loss fencing and exact cloud candidate | Pending isolated operator-led validation (#61) |
+
 Observation date: 2026-09-24. Source branch: `feat/full-parity`; candidate images
 were built from the working tree based on commit `b351722`, before candidate
 commits. These are local fixture
@@ -721,5 +738,254 @@ unchanged, and no Pod started. Both existing active test workspace Pod UIDs and
 restart counts also remained unchanged through the gateway-only rollout.
 
 This verifies the subscription protocol correction, not uncached transcript
-access while compute is stopped. A longer read-only memory observation is in
-progress; #72 remains open pending its outcome and further candidate validation.
+access while compute is stopped.
+
+The same normal candidate subsequently reached 80 minutes of process age at
+20:09:53 UTC with zero restarts, unchanged image/Pod UID/process start, and no
+recorded termination. There were 21,778 external memory samples over 78 minutes
+50 seconds: RSS stayed at 327–356 MiB and cgroup usage peaked at 370 MiB. All
+16 authenticated project/retained-inventory SDK polls passed. Both existing
+workspace Pod UIDs and restart counts remained unchanged.
+
+The host slept during the observation, producing a 229-second sampling gap;
+this is not an uninterrupted 80-minute soak. It exceeds the previously observed
+15–38-minute recurrence intervals and supports the targeted mitigation, without
+establishing arbitrary-load or EKS stability. The release's exact ARM64 gateway
+artifact must also pass the bounded validator regression before signing;
+representative EKS load and failure observation remain part of #61.
+
+
+## Catalog scope, invalidation and missing-reference recovery
+
+On 2026-09-25, five additional SDK/Kubernetes checks passed against gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+Three newly created project/profile scopes used the existing authorized Claude
+credential reference and workspace image `paseo-workspace:parity-final5`.
+Two scopes discovered catalogs independently, with distinct durable fingerprints
+and matching requested `cwd`. Their runtime/provider configurations were equivalent
+apart from a harmless ConfigMap-backed environment value; this establishes scope
+and fingerprint separation, not different model contents.
+
+Changing only one fixture ConfigMap's resource version caused that catalog to
+be rediscovered while the other fingerprint remained unchanged. A third profile's
+missing ConfigMap produced no verified-ready result; creating that reference
+allowed subsequent discovery to complete. No user workspace or agent was created,
+and no model prompt was sent. Completed probes were checked before UID-fenced
+cleanup of the owned project/profile/configuration and catalog records.
+
+The first fixture attempt correctly hit the reserved runtime-environment-name
+admission rule; the harmless test variable was changed to a non-reserved name
+before these checks ran. These automated results complement the earlier native
+probe and interrupted-discovery recovery evidence. They do not replace the
+fresh-preference, zero-Ready Desktop check or prove EKS network enforcement.
+
+
+## Secured checkout receipt across Kubernetes restarts
+
+On 2026-09-25, the init-only receipt qualification passed on the normal gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`.
+It used tiny fixture derivatives of workspace base
+`sha256:f7e76745f971ef599a959e504c7af55601bb68cac11f372a58a8d41b7686cd63`,
+with the current product initializer/receipt code and an instrumented Git wrapper.
+The wrapper injected failures and recorded only receipt counters/permissions.
+These are fault-injection derivatives, not unmodified release-image qualification.
+
+| Check | Observed result |
+| --- | --- |
+| DNS failure across init restarts | Exactly three fetches, two init restarts, one Pod-wide start/deadline receipt; `CheckoutDnsUnavailable`, attempts 3 |
+| Permanent authentication failure | Exactly one fetch across two init restarts; `CheckoutAuthenticationFailed`, attempts 1; daemon never started |
+| Clean recovery | New Pod/fresh budget, same PVC, successful checkout and retained sentinel |
+| Subsequent completed-checkout restart | Dirty file preserved; no additional Git fetch |
+| Receipt isolation | Dedicated 1 MiB init-only volume and private ownership/mode; daemon could not read receipt |
+
+Clean/DNS/authentication fixture image digests were respectively
+`sha256:10f92d9268f8e6a7744094f16160519e17e81df85c45c5ac7569ded9f82f32e7`,
+`sha256:a925f0493178e21cd2e22289487df0ab61316369502ca4217676937a155c1a0b`,
+and `sha256:e1f2df8e40de7be687057911a9f8bb511608a4629b6eeb91fdb5c9224343c2c2`.
+No provider prompt was dispatched. Cleanup of the permanently failing fixture
+first required removing its artificial fault image and replacing only its owned
+Pod so normal teardown could run. Both fixtures then completed controller
+teardown and their exact UID-recorded workspaces, PVCs, projects and profiles
+were observed deleted; no archive or finalizer safety check was bypassed.
+
+
+## Capacity admission and failed teardown rehearsal
+
+On 2026-09-25, isolated public-repository fixtures on Docker Desktop verified
+project capacity and scheduler diagnostics against the normal gateway candidate.
+A project cap of one admitted exactly one of two concurrent SDK creation calls.
+A separately submitted over-cap Workspace stayed Pending with a capacity message
+and no Pod, while the admitted worker stayed Ready. A second fixture requested
+an impossible CPU allocation; its Pending status exposed
+`lastFailure.reason=Unschedulable`. The final harness run exited successfully and
+independent UID checks found none of its 17 recorded resources remaining.
+
+Two earlier harness cleanup attempts needed correction: first they used the
+normal Ready-workspace path for an unschedulable Pod, then deletion while desired
+residency was Running allowed controller recreation. UID guards refused the
+changed Pod. The final cleanup first changed desired residency to Suspended,
+then removed the exact owned Pod and waited for absence. These fixture mistakes
+were not represented as product failures or successful clean runs.
+
+A separate retained fixture used a harmless teardown hook that incremented a
+counter and exited nonzero. Its archive request entered Failed without a
+`teardownCompletedAt` timestamp. Exact Pod/PVC UIDs and a sentinel remained;
+a durable teardown intent existed, no completion marker existed, and a six-second
+recheck showed the counter was still one. This proves retained failure state and
+no immediate automatic hook replay, not successful archival. The disposable
+fixture was then explicitly removed with UID checks: all seven recorded resources
+were absent, and no protective finalizer was removed. Both original user Pod UIDs
+remained unchanged throughout these rehearsals.
+
+These checks do not establish live API-outage handling, OOM/eviction recovery or
+node-partition fencing. Those remain separately graded failure scenarios.
+
+## Real permission prompt regression
+
+Two actual Claude agents in separate owned workspaces requested permission for
+harmless fixture-file writes. The scoped in-pod CLI aggregated both through
+`permit ls --json`. Its `permit deny <agent> --all --json` call returned, but the
+original selected prompt remained pending through the bounded deadline. The
+second workspace stayed pending. Approval and file-isolation completion were
+not claimed for this failed run.
+
+This occurred on gateway
+`sha256:a645397913816d52ef2c74a8cfd99dc4dd2d75f85e7d042eeef7d6f273340c35`
+and workspace
+`sha256:cba69c0dfe4e5eb4f1b0ddf3275a6a0b7aaeb54582518770c981fe3356a75996`.
+An offline socket regression subsequently reproduced a received permission reply
+being dropped when an immediate client close raced asynchronous authorization.
+The correction and final live replay are tracked in #77. Both live fixtures were
+removed after normal controller teardown and observed Pod absence, using exact
+UIDs; cleanup required reconnecting after the first workspace archive closed the
+harness session.
+
+## Readiness follow-up — 2026-09-29
+
+The permission-disconnect correction has a deterministic socket regression for
+a received decision delayed by authorization while the CLI closes. A separate
+permission session allows bounded completion without extending unrelated
+in-flight mutations. Expiry, revocation, policy closes and shutdown still cancel
+the decision. The pinned official `@getpaseo/cli@0.9.1` lifecycle/permission and
+schedule contract suites passed using a disposable local installation. This
+fixture evidence does not replace the pending two-workspace real-provider replay
+of CLI denial, SDK approval and file isolation.
+
+[Retained history](retained-history.md) now captures bounded native projected
+pages on the workspace PVC before controlled shutdown. A metadata-only receipt
+selects an immutable snapshot; stopped reads use a credential-free, read-only
+helper with authorization and lifecycle checks before and after access. Source
+review and focused tests covered first capture, interrupted publication,
+concurrent archive generation changes, stale cleanup, cancellation and helper
+isolation. Existing suspended volumes without a snapshot still need the documented
+one-time resume/capture migration; already-archived volumes cannot be resumed. Long histories can be explicitly truncated;
+this is not unlimited offline transcript retention.
+
+The native daemon suite includes a real capture-to-file write/read assertion,
+but local Docker execution and the final Desktop checklist have not been run
+on this candidate. Local capacity and connection setup must be restored first.
+No EKS installation or live EKS qualification was performed in this follow-up.
+The published alpha.3 release remains distinct from this development candidate.
+
+## Candidate permission replay — 2026-09-29
+
+The full Docker Desktop candidate passed all four live permission checks. Two
+Claude agents in separate workspaces requested permission for harmless fixture
+file writes. The scoped in-pod CLI listed both; CLI denial removed only the first
+agent's permission while the second remained pending. SDK approval then allowed
+only the second workspace's file write. Both Pods kept their UIDs and had zero
+container restarts during this run.
+
+The gateway used
+`sha256:201b228edb78ef99a3f4a7332625bc5eb56469ed04d6bb3c4d945d46fbfceb3c`;
+both workers used
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+These were full production Dockerfile builds from source `d4d09e0`, not published
+release artifacts.
+
+An earlier disposable run failed at its first agent creation with a connection
+timeout and completed normal teardown. Its cause remains unconfirmed. The
+successful replay observed Ready Pods and Services with endpoints targeting the
+exact Pods; each agent creation completed in roughly two seconds. No product fix
+is claimed for the earlier timeout.
+
+The successful run completed normal archive and storage cleanup. Independent
+read-only checks confirmed every owned Project, CredentialProfile, Workspace,
+PVC and Pod was absent. Existing user workspaces were unchanged by this test.
+This completes the previously pending real-provider replay for #77; it does not
+qualify EKS or a different release artifact.
+
+## Fresh Desktop catalog and branch selection — 2026-09-30
+
+Paseo Desktop 0.10.2, using a new isolated preference directory with built-in
+daemon management disabled, passed the cold-project flow. Before discovery,
+the namespace had zero Ready workspaces and the uniquely scoped Project and
+CredentialProfile had no catalog record. Existing test workspaces were
+temporarily suspended with their original PVCs retained.
+
+The operator connected, selected the fresh project, chose Claude Code and a
+model, selected the nondefault `octocat-patch-1` branch in the worktree base
+picker, and submitted one prompted Chat. The chat opened and displayed command
+activity and its reply without refresh or prompt resubmission. Read-only
+postconditions confirmed exactly one workspace and agent, one user/assistant
+marker pair, a tool call, and an idle agent. The workspace's immutable revision
+and actual Git HEAD matched the selected remote branch; its generated local
+branch matched the workspace specification. `FETCH_HEAD` was subsequently
+different, so it was not used as proof of the originally selected checkout.
+
+The operator observed about one minute before providers/models appeared and
+10–20 seconds for branches. The catalog record was created at 15:25:28 UTC and
+verified at 15:25:46.946 UTC, about 19 seconds for that server-side interval.
+These are separate measurements; the longer end-to-end delay remains a
+performance observation, not an established latency guarantee.
+
+The gateway was a full production Dockerfile build from `8f28108`, digest
+`sha256:66c6c6e61fe4e5ccf46d77ad8f62de9f36a435573b46441e9e689f41b4043e55`;
+the workspace used the unchanged
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+This supplies the previously pending fresh-profile catalog, branch-picker and
+first-turn Desktop evidence. The following section records stopped-history
+acceptance. Exact published-artifact qualification remains separate.
+
+## Stopped-history live replay — 2026-09-30
+
+The preceding day's full-image fixture completed a real Claude turn with a
+command, captured three native projected timeline entries on its retained PVC,
+and suspended. A fresh SDK client listed the saved agent as closed, subscribed
+to its timeline, and read the original prompt, command and reply without a
+workspace daemon. A watched reader Pod was created and deleted with the same
+UID. The harness's immediate final-state assertion failed; a separate read-only
+check confirmed the same workspace generation and PVC, no daemon or reader,
+and a completed Suspended state.
+
+Follow-up regressions found two distinct races. Reconciliation temporarily
+changed a completed stopped workspace to Pending while its reader existed.
+Also, an immediate second read could encounter a reader whose deletion had
+been acknowledged but whose Pod still existed. The fixes preserve completed
+stopped state, serialize same-workspace reads, wait within the deadline for
+owned terminating readers, and recheck workspace and PVC identity. Tests cover
+concurrent reads, queued cancellation, changed authority and foreign readers.
+
+Before the reuse fix, the live sequence read once successfully and failed on
+the second read. After the fix, three consecutive fresh-client reads all passed:
+each returned the same three entries with exactly one user and assistant marker
+and a command, while the workspace's stopped state and resourceVersion remained
+unchanged. The original PVC UID was preserved throughout.
+
+The successful gateway was built from `82e047d`, digest
+`sha256:8559be60bdc9fee6f1d22cc684512a6a5c5d1c12a9d1779a6ca5ee22d154365a`.
+An earlier local build of that source had unreadable package-file permissions
+caused by the private archive-extraction harness. It failed startup and Helm
+rolled back successfully. The harness was corrected to preserve explicit source
+file modes; a network-isolated runtime check failed on the original image and
+passed on the replacement before deployment. The successful gateway started
+with zero container restarts. This build correction did not change repository
+code or the production Dockerfile.
+
+The combined repository checks passed 433 tests, typecheck, lint, release and
+qualification checks, and build. The operator then confirmed that Desktop
+0.10.2's fresh QA profile displayed the stopped conversation's original prompt,
+command activity and exact reply without resuming or resending. A subsequent
+read-only check confirmed the same workspace UID remained Suspended. This
+completes the manual stopped-conversation check; published-artifact qualification
+and EKS validation remain separate.

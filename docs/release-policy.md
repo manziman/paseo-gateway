@@ -32,12 +32,15 @@ Use the exact chart, architecture and image digests in the release record. Kind
 CI validates the declared Kubernetes/Helm matrix; it does not establish production
 CSI, networking, failover or EKS support.
 
-Claude is the live-tested provider. Codex and OpenCode are pinned runtime options,
-but authenticated provider parity is not claimed until separately verified.
-Shared rotating Codex OAuth files, HA, complete desktop attachment/voice/plugin
-parity and Agent Sandbox adoption remain outside this release. The original
-specification's full acceptance bar and issues #16, #22 and #26 remain in force
-for a future full-parity claim. Alpha publication does not close those gaps.
+Local Docker Desktop acceptance has exercised authenticated Claude, Codex
+subscription and OpenCode workers, including concurrent prompts and gateway
+replacement. A dedicated Codex refresh authority has passed native renewal with
+access-only worker credentials. Actual provider-side expiry, independent valid
+credential replacement and EKS behavior remain unqualified. Sharing rotating
+Codex OAuth files between workers, HA, optional desktop voice/plugins, and
+Agent Sandbox adoption remain outside this release. The original specification's
+full acceptance bar and issues #16, #22, #26 and #57 remain in force for a future
+full-parity claim. Alpha publication does not close those gaps.
 
 Workspace loss can interrupt a turn. The gateway does not replay uncertain
 mutations or prompts. Retained PVCs do not by themselves provide node fencing or
@@ -50,6 +53,18 @@ release notes and CRD/data compatibility. There is no production SLA or guarante
 backport window. Report vulnerabilities privately using [SECURITY.md](../SECURITY.md).
 Security updates pass the same required checks and artifact scans as other changes.
 Images and their bundled third-party programs retain their own licenses/terms.
+
+The current release toolchain includes npm's bundled `ip-address@10.5.0` through
+the development-only semantic-release dependency. The final gateway image removes
+npm, but the workspace image installs global npm 12.1.0 for workspace package
+commands; that published npm tarball also bundles `ip-address@10.5.0`. This
+version is affected by [GHSA-2vr4-cq9g-pvrc](https://github.com/advisories/GHSA-2vr4-cq9g-pvrc),
+whose NAT64 local-use classification issue is conditional on the network and
+caller using those classifiers as a trust boundary. Gateway source does not call
+those classifiers. npm's bundled copy cannot be replaced by a lockfile-only
+update or the tested npm override. Keep the advisory open, inspect the next
+upstream npm bundle, and requalify both images after a patched npm release; do
+not represent the current workspace image as free of the affected package.
 
 PRs require passing type, lint, unit, CLI, upstream, chart and security checks.
 Conventional titles are checked on creation and edits. The sole maintainer may

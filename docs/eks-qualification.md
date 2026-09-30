@@ -11,7 +11,8 @@ candidate image digests, check status, and issue links.
 
 Copy [example EKS values](eks-values.example.yaml) to a local file, fill both
 candidate digests and the actual encrypted StorageClass, and adapt egress to an
-approved proxy. Choose the target context, existing test namespace, EBS CSI
+approved proxy. Set an explicit external gateway host allowlist and distinct
+TLS Secret names. Choose the target context, existing test namespace, EBS CSI
 StorageClass, and that local values file deliberately. The script never uses the current kubecontext
 or default namespace. It invokes only Kubernetes GET/version and `auth can-i`
 queries; it does not read Secret values or mutate cluster resources.
@@ -21,6 +22,7 @@ node scripts/eks-preflight.mjs \
   --context "$QUALIFICATION_CONTEXT" \
   --namespace "$QUALIFICATION_NAMESPACE" \
   --storage-class "$QUALIFICATION_STORAGE_CLASS" \
+  --network-mode "$QUALIFICATION_NETWORK_MODE" \
   --values "$QUALIFICATION_VALUES" \
   > "$LOCAL_REDACTED_PREFLIGHT"
 ```
@@ -28,9 +30,15 @@ node scripts/eks-preflight.mjs \
 Exit code 1 means at least one requirement is blocked. The report intentionally
 does not print context or namespace names, Kubernetes object YAML, kubectl errors,
 image references, CNI arguments, or private endpoints. Keep the local values
-file outside public artifacts. The check observes the API version, EBS CSI driver
-and class, explicit `encrypted: "true"`, namespace RBAC, and requested chart policy
-settings. For standard EKS it reads the VPC CNI policy agent and strict startup
+file outside public artifacts. The check observes an Active namespace UID, API
+version, EBS CSI driver and class, a chart StorageClass matching the inspected
+class, explicit `encrypted: "true"`, established namespaced CRDs serving
+`v1alpha1`, operator RBAC, and requested chart policy settings. It rejects
+empty or unrestricted egress rules; specific rule syntax still needs chart
+lint/render and operator review. Select `--network-mode standard` or
+`--network-mode auto` explicitly; the StorageClass provisioner does not
+identify networking mode. For standard EKS it reads the VPC CNI policy
+agent and strict startup
 setting; for Auto Mode it reads the `amazon-vpc-cni` controller ConfigMap. Auto
 Mode manages networking differently and has no required `aws-node` DaemonSet;
 review the selected NodeClass policy in private and perform a startup probe. It cannot prove a
@@ -48,6 +56,10 @@ verify image pull from the selected registry by exact digest during the isolated
 fixture. If the StorageClass relies on account-wide EBS encryption by default,
 verify the effective volume setting through the cloud API after provisioning;
 the preflight cannot infer that default. Validate any custom KMS key permissions.
+Record available node capacity and taints, selected NodeClass, gateway runtime
+command, registry authentication, and the credential migration/restore plan
+privately. A Secret's name or existence does not prove its contents; never print
+Secret values during preflight.
 
 ## Isolated fixture and acceptance order
 
@@ -66,7 +78,8 @@ the preflight cannot infer that default. Validate any custom KMS key permissions
    checks configuration only; verify real handshakes and rotation separately.
    NetworkPolicy restricts connections; it does not encrypt them.
 3. Render and inspect chart values, apply only within the fixture namespace, then
-   verify exact image digests, Pod readiness, PVC binding and actual
+   verify CRD schema compatibility, installed gateway ServiceAccount permissions,
+   exact image digests, Pod readiness, PVC binding and actual
    `spec.accessModes: [ReadWriteOncePod]` on newly created claims, volume encryption,
    events, and denied image pull behavior. Test provider catalog and one private
    scheduled orchestrator-to-worker job using scoped credentials and approved
@@ -74,7 +87,8 @@ the preflight cannot infer that default. Validate any custom KMS key permissions
 4. From separately labeled fixture Pods, prove allowed gateway-to-workspace,
    workspace-to-DNS, approved provider and private destination traffic. Prove
    denied cross-workspace daemon, disallowed external, and metadata-service
-   traffic. Exercise the Pod at startup as well as steady state. Record packet
+   traffic. Exercise the Pod at startup as well as steady state; record startup
+   enforcement as a separate acceptance check. Record packet
    destination category and outcome, without private addresses. A rendered
    NetworkPolicy or enabled CNI flag alone is insufficient. Avoid `hostNetwork`.
    The restricted source Pod must carry `app.kubernetes.io/component: workspace`
@@ -128,6 +142,9 @@ prints only check IDs and status. Each passing key requires `status: "PASS"`,
 `failure.old-writer-fenced` key additionally requires
 `dedicatedFailureFixture: true`. This grader validates completeness, not the
 underlying observations; reviewers must inspect the private evidence separately.
+In particular, live CRD/ServiceAccount RBAC, RWOP binding, certificate identity,
+and startup enforcement each need their own evidence; a preflight flag or
+rendered manifest cannot satisfy those keys.
 
 ## Source constraints
 

@@ -26,3 +26,29 @@ test("writer fencing requires explicit dedicated failure fixture evidence", () =
   evidence["failure.old-writer-fenced"].dedicatedFailureFixture = true;
   assert.equal(grade(evidence).qualification, "PASS");
 });
+
+test("all operational install and startup gates require their own live evidence", () => {
+  const omitted = new Set([
+    "install.crd-and-serviceaccount-rbac",
+    "install.rwop-claim",
+    "transport.certificate-identity",
+    "network.startup-enforcement",
+  ]);
+  const evidence = Object.fromEntries(
+    required
+      .filter((id) => !omitted.has(id))
+      .map((id) => [
+        id,
+        {
+          status: "PASS",
+          kind: "live-eks",
+          evidence: "private receipt",
+          ...(id === "failure.old-writer-fenced" ? { dedicatedFailureFixture: true } : {}),
+        },
+      ]),
+  );
+  const report = grade(evidence);
+  assert.equal(report.qualification, "BLOCKED");
+  for (const id of omitted)
+    assert.equal(report.checks.find((check) => check.id === id)?.status, "BLOCKED");
+});
