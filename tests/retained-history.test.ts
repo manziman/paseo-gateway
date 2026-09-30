@@ -2,7 +2,7 @@ import { mkdtemp, readFile, realpath, rm, symlink, utimes } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionOutboundMessageSchema } from "@getpaseo/protocol/messages";
-import { CoreV1Api, KubeConfig } from "@kubernetes/client-node";
+import { CoreV1Api, KubeConfig, type V1Pod } from "@kubernetes/client-node";
 import { describe, expect, it, vi } from "vitest";
 import { pruneSnapshots, readAgent, writeSnapshot } from "../docker/retained-history.mjs";
 import {
@@ -10,6 +10,7 @@ import {
   historyReaderName,
   resourceName,
 } from "../src/controller/resources.js";
+import { WORKSPACE_UID_LABEL, type Workspace } from "../src/domain.js";
 import type { Backend } from "../src/gateway/backend.js";
 import {
   captureRetainedHistory,
@@ -19,6 +20,7 @@ import {
   retainedHistoryPage,
 } from "../src/gateway/retained-history.js";
 import { KubernetesStore } from "../src/kubernetes/client.js";
+import type { Infrastructure } from "../src/kubernetes/store.js";
 import { workspace } from "./fixtures.js";
 import { MemoryRecordStore } from "./record-store.js";
 
@@ -40,8 +42,356 @@ const history: RetainedAgentHistory = {
   entries: [entry(1), entry(2), entry(3)],
   truncated: false,
 };
+const readerOwner = (row: Workspace) => [
+  {
+    apiVersion: row.apiVersion,
+    kind: row.kind,
+    name: row.metadata.name,
+    uid: row.metadata.uid ?? "",
+    controller: true,
+  },
+];
 
 describe("retained history snapshots", () => {
+  it("never mounts an active workspace as a retained history reader", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.status = { phase: "Ready", message: "running", observedGeneration: 1 };
+    const get = vi.spyOn(store, "get");
+    const create = vi.spyOn(CoreV1Api.prototype, "createNamespacedPod");
+    try {
+      await expect(
+        store.readRetainedHistory(row, agentId, "image", "receipt.json"),
+      ).rejects.toThrow(/storage is unavailable/i);
+      expect(get).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      create.mockRestore();
+    }
+  });
+  it("allows an immediate second read after delete ACK while the old reader is terminating", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
+    let reader: V1Pod | undefined;
+    let terminatingReads = 0;
+    let creates = 0;
+    const get = vi
+      .spyOn(store, "get")
+      .mockImplementation(async (kind): Promise<Infrastructure | undefined> => {
+        if (kind === "PersistentVolumeClaim")
+          return { kind, metadata: { uid: "pvc-uid", labels: { [WORKSPACE_UID_LABEL]: uid } } };
+        if (kind === "Pod") {
+          if (reader?.metadata?.deletionTimestamp && ++terminatingReads === 3) reader = undefined;
+          return reader;
+        }
+        return undefined;
+      });
+    const workspaces = vi.spyOn(store, "workspaces").mockResolvedValue([row]);
+    const create = vi
+      .spyOn(CoreV1Api.prototype, "createNamespacedPod")
+      .mockImplementation(async () => {
+        if (reader) throw new Error("Reader name reused before old Pod disappeared");
+        reader = {
+          kind: "Pod",
+          metadata: {
+            uid: `reader-${++creates}`,
+            labels: {
+              [WORKSPACE_UID_LABEL]: uid,
+              "app.kubernetes.io/component": "history-reader",
+            },
+            ownerReferences: readerOwner(row),
+          },
+          status: { phase: "Running" },
+        };
+        return reader;
+      });
+    const deletion = vi.spyOn(store, "deletePod").mockImplementation(async (_name, expectedUid) => {
+      expect(reader?.metadata?.uid).toBe(expectedUid);
+      if (!reader?.metadata) throw new Error("Missing reader metadata");
+      reader.metadata.deletionTimestamp = new Date();
+      terminatingReads = 0;
+    });
+    Object.assign(store, {
+      async execHistory() {
+        return Buffer.from(JSON.stringify({ found: false }));
+      },
+    });
+    try {
+      expect(await store.readRetainedHistory(row, agentId, "image", "receipt.json")).toEqual({
+        found: false,
+      });
+      expect(await store.readRetainedHistory(row, agentId, "image", "receipt.json")).toEqual({
+        found: false,
+      });
+      expect(creates).toBe(2);
+      expect(deletion).toHaveBeenCalledTimes(2);
+    } finally {
+      get.mockRestore();
+      workspaces.mockRestore();
+      create.mockRestore();
+      deletion.mockRestore();
+    }
+  });
+  it("keeps later reads behind an active reader when an intermediate queued read cancels", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
+    let reader: V1Pod | undefined;
+    let creates = 0;
+    let entered!: () => void;
+    const firstExec = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finish!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const get = vi.spyOn(store, "get").mockImplementation(async (kind) => {
+      if (kind === "PersistentVolumeClaim")
+        return { kind, metadata: { uid: "pvc-uid", labels: { [WORKSPACE_UID_LABEL]: uid } } };
+      if (kind === "Pod") {
+        if (reader?.metadata?.deletionTimestamp) reader = undefined;
+        return reader;
+      }
+      return undefined;
+    });
+    const workspaces = vi.spyOn(store, "workspaces").mockResolvedValue([row]);
+    const create = vi
+      .spyOn(CoreV1Api.prototype, "createNamespacedPod")
+      .mockImplementation(async () => {
+        if (reader) throw new Error("Overlapping reader Pods");
+        reader = {
+          kind: "Pod",
+          metadata: {
+            uid: `reader-${++creates}`,
+            labels: { [WORKSPACE_UID_LABEL]: uid, "app.kubernetes.io/component": "history-reader" },
+            ownerReferences: readerOwner(row),
+          },
+          status: { phase: "Running" },
+        };
+        return reader;
+      });
+    const deletion = vi.spyOn(store, "deletePod").mockImplementation(async (_name, expectedUid) => {
+      expect(reader?.metadata?.uid).toBe(expectedUid);
+      if (!reader?.metadata) throw new Error("Missing reader metadata");
+      reader.metadata.deletionTimestamp = new Date();
+    });
+    let execs = 0;
+    Object.assign(store, {
+      async execHistory() {
+        if (++execs === 1) {
+          entered();
+          await firstPending;
+        }
+        return Buffer.from(JSON.stringify({ found: false }));
+      },
+    });
+    try {
+      const first = store.readRetainedHistory(row, agentId, "image", "receipt.json");
+      await firstExec;
+      const cancel = new AbortController();
+      const canceled = store.readRetainedHistory(
+        row,
+        agentId,
+        "image",
+        "receipt.json",
+        Date.now() + 35000,
+        cancel.signal,
+      );
+      cancel.abort();
+      await expect(canceled).rejects.toThrow(/closed/i);
+      const second = store.readRetainedHistory(row, agentId, "image", "receipt.json");
+      let secondSettled = false;
+      void second.then(
+        () => {
+          secondSettled = true;
+        },
+        () => {
+          secondSettled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(secondSettled).toBe(false);
+      expect(creates).toBe(1);
+      finish();
+      expect(await first).toEqual({ found: false });
+      expect(await second).toEqual({ found: false });
+      expect(creates).toBe(2);
+      expect(deletion).toHaveBeenCalledTimes(2);
+    } finally {
+      finish();
+      get.mockRestore();
+      workspaces.mockRestore();
+      create.mockRestore();
+      deletion.mockRestore();
+    }
+  });
+  it("does not create a reader when the terminating Pod is replaced while waiting", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
+    let reads = 0;
+    const get = vi
+      .spyOn(store, "get")
+      .mockImplementation(async (kind): Promise<Infrastructure | undefined> => {
+        if (kind === "PersistentVolumeClaim")
+          return { kind, metadata: { uid: "pvc-uid", labels: { [WORKSPACE_UID_LABEL]: uid } } };
+        if (kind === "Pod")
+          return {
+            kind,
+            metadata: {
+              uid: `reader-${++reads}`,
+              deletionTimestamp: new Date(),
+              labels: {
+                [WORKSPACE_UID_LABEL]: uid,
+                "app.kubernetes.io/component": "history-reader",
+              },
+              ownerReferences: readerOwner(row),
+            },
+          };
+        return undefined;
+      });
+    const create = vi.spyOn(CoreV1Api.prototype, "createNamespacedPod").mockResolvedValue({});
+    try {
+      await expect(
+        store.readRetainedHistory(row, agentId, "image", "receipt.json"),
+      ).rejects.toThrow(/already active/i);
+      expect(reads).toBe(2);
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      create.mockRestore();
+    }
+  });
+  it("does not wait for a label-spoofed reader without the Workspace owner UID", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
+    const get = vi
+      .spyOn(store, "get")
+      .mockImplementation(async (kind): Promise<Infrastructure | undefined> => {
+        if (kind === "PersistentVolumeClaim")
+          return { kind, metadata: { uid: "pvc-uid", labels: { [WORKSPACE_UID_LABEL]: uid } } };
+        if (kind === "Pod")
+          return {
+            kind,
+            metadata: {
+              uid: "lookalike",
+              deletionTimestamp: new Date(),
+              labels: {
+                [WORKSPACE_UID_LABEL]: uid,
+                "app.kubernetes.io/component": "history-reader",
+              },
+            },
+          };
+        return undefined;
+      });
+    const create = vi.spyOn(CoreV1Api.prototype, "createNamespacedPod").mockResolvedValue({});
+    try {
+      await expect(
+        store.readRetainedHistory(row, agentId, "image", "receipt.json"),
+      ).rejects.toThrow(/already active/i);
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      create.mockRestore();
+    }
+  });
+  it("does not create a reader if workspace generation changes during the terminating-Pod wait", async () => {
+    const config = new KubeConfig();
+    config.loadFromOptions({
+      clusters: [{ name: "test", server: "https://kubernetes.invalid" }],
+      users: [{ name: "test" }],
+      contexts: [{ name: "test", cluster: "test", user: "test" }],
+      currentContext: "test",
+    });
+    const store = new KubernetesStore(config, "test");
+    const row = workspace("one");
+    row.metadata.uid = uid;
+    row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
+    const changed = structuredClone(row);
+    changed.metadata.generation = (row.metadata.generation ?? 1) + 1;
+    let podReads = 0;
+    const get = vi
+      .spyOn(store, "get")
+      .mockImplementation(async (kind): Promise<Infrastructure | undefined> => {
+        if (kind === "PersistentVolumeClaim")
+          return { kind, metadata: { uid: "pvc-uid", labels: { [WORKSPACE_UID_LABEL]: uid } } };
+        if (kind === "Pod" && ++podReads === 1)
+          return {
+            kind,
+            metadata: {
+              uid: "old-reader-uid",
+              deletionTimestamp: new Date(),
+              labels: {
+                [WORKSPACE_UID_LABEL]: uid,
+                "app.kubernetes.io/component": "history-reader",
+              },
+              ownerReferences: readerOwner(row),
+            },
+          };
+        return undefined;
+      });
+    const workspaces = vi.spyOn(store, "workspaces").mockResolvedValue([changed]);
+    const create = vi.spyOn(CoreV1Api.prototype, "createNamespacedPod").mockResolvedValue({});
+    try {
+      await expect(
+        store.readRetainedHistory(row, agentId, "image", "receipt.json"),
+      ).rejects.toThrow(/workspace changed before reader creation/i);
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      workspaces.mockRestore();
+      create.mockRestore();
+    }
+  });
   it("never creates a reader after cancellation during the PVC ownership read", async () => {
     const config = new KubeConfig();
     config.loadFromOptions({
@@ -54,6 +404,7 @@ describe("retained history snapshots", () => {
     const row = workspace("one");
     row.metadata.uid = uid;
     row.spec.residency = "Suspended";
+    row.status = { phase: "Suspended", message: "stopped", observedGeneration: 1 };
     let release!: (value: unknown) => void;
     const pending = new Promise<unknown>((resolve) => {
       release = resolve;

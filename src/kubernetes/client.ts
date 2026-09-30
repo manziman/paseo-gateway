@@ -27,9 +27,20 @@ import { type Infrastructure, type InfrastructureKind, type Store, statusCode } 
 
 const MAX_HISTORY_OUTPUT = 2 * 1024 * 1024 + 65536;
 
+function completedHistoryStop(workspace: Workspace): boolean {
+  return (
+    workspace.status?.observedGeneration === (workspace.metadata.generation ?? 1) &&
+    ((workspace.spec.residency === "Suspended" && workspace.status.phase === "Suspended") ||
+      (workspace.spec.residency === "Archived" &&
+        workspace.status.phase === "Archived" &&
+        !!workspace.status.teardownCompletedAt))
+  );
+}
+
 /** API responses are validated before entering the domain. API conflicts are retried by reconciliation. */
 export class KubernetesStore implements Store, RecordStore {
   private activeHistoryReaders = 0;
+  private readonly historyReaderTails = new Map<string, Promise<void>>();
   private readonly core: CoreV1Api;
   private readonly custom: CustomObjectsApi;
 
@@ -395,17 +406,71 @@ export class KubernetesStore implements Store, RecordStore {
     const uid = workspace.metadata.uid;
     if (!uid) throw new Error("Workspace UID required for retained history");
     const pvc = await this.get("PersistentVolumeClaim", resourceName(workspace));
+    const pvcUid = pvc?.metadata?.uid;
     check();
     if (
-      !pvc ||
+      !pvcUid ||
       pvc.metadata?.labels?.[WORKSPACE_UID_LABEL] !== uid ||
       pvc.metadata?.deletionTimestamp
     )
       throw new Error("Owned retained workspace storage is unavailable");
     const name = historyReaderName(workspace);
-    const existing = await this.get("Pod", name);
+    // Deletion is acknowledged before the Pod name necessarily disappears.
+    // A later read may wait for its own terminating helper, but never adopt a
+    // foreign or still-active Pod. The caller's request deadline bounds this.
+    let terminatingUid: string | undefined;
+    while (true) {
+      const existing = await this.get("Pod", name);
+      check();
+      if (!existing) break;
+      if (
+        !existing.metadata?.uid ||
+        existing.metadata?.labels?.[WORKSPACE_UID_LABEL] !== uid ||
+        existing.metadata.labels["app.kubernetes.io/component"] !== "history-reader" ||
+        !existing.metadata.ownerReferences?.some(
+          (owner) =>
+            owner.uid === uid &&
+            owner.apiVersion === workspace.apiVersion &&
+            owner.kind === workspace.kind &&
+            owner.name === workspace.metadata.name &&
+            owner.controller === true,
+        ) ||
+        !existing.metadata.deletionTimestamp ||
+        (terminatingUid && existing.metadata.uid !== terminatingUid)
+      )
+        throw new Error("Retained history reader is already active; retry later");
+      terminatingUid = existing.metadata.uid;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      check();
+    }
+    const current = (await this.workspaces()).find(
+      (row) => row.metadata.name === workspace.metadata.name,
+    );
     check();
-    if (existing) throw new Error("Retained history reader is already active; retry later");
+    if (
+      !current ||
+      current.metadata.uid !== uid ||
+      current.metadata.generation !== workspace.metadata.generation ||
+      current.metadata.resourceVersion !== workspace.metadata.resourceVersion ||
+      current.spec.residency !== workspace.spec.residency ||
+      current.status?.phase !== workspace.status?.phase ||
+      current.spec.projectRef !== workspace.spec.projectRef ||
+      current.spec.credentialProfile !== workspace.spec.credentialProfile ||
+      current.spec.retentionPolicy?.storage !== workspace.spec.retentionPolicy?.storage ||
+      current.status?.storageDeletedAt ||
+      current.metadata.deletionTimestamp ||
+      !completedHistoryStop(current)
+    )
+      throw new Error("Retained history workspace changed before reader creation");
+    const currentPvc = await this.get("PersistentVolumeClaim", resourceName(workspace));
+    check();
+    if (
+      !currentPvc ||
+      currentPvc.metadata?.uid !== pvcUid ||
+      currentPvc.metadata?.labels?.[WORKSPACE_UID_LABEL] !== uid ||
+      currentPvc.metadata?.deletionTimestamp
+    )
+      throw new Error("Owned retained workspace storage changed before reader creation");
     return this.core.createNamespacedPod({
       namespace: this.namespace,
       body: desiredHistoryReader(workspace, image, this.namespace),
@@ -424,6 +489,8 @@ export class KubernetesStore implements Store, RecordStore {
     const uid = workspace.metadata.uid;
     if (
       !uid ||
+      workspace.metadata.deletionTimestamp ||
+      !completedHistoryStop(workspace) ||
       workspace.spec.retentionPolicy?.storage === "Ephemeral" ||
       workspace.status?.storageDeletedAt
     )
@@ -431,6 +498,18 @@ export class KubernetesStore implements Store, RecordStore {
     if (this.activeHistoryReaders >= 4)
       throw new Error("Retained history reader capacity reached; retry later");
     this.activeHistoryReaders++;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const previousTurn = this.historyReaderTails.get(uid);
+    // Keep the tail transitive: if this queued call cancels before its
+    // predecessor finishes, later calls must still wait for that predecessor.
+    const tail = previousTurn ? previousTurn.then(() => turn) : turn;
+    this.historyReaderTails.set(uid, tail);
+    void tail.then(() => {
+      if (this.historyReaderTails.get(uid) === tail) this.historyReaderTails.delete(uid);
+    });
     const deadline = Math.min(deadlineAt, Date.now() + 35000);
     const check = () => {
       if (signal?.aborted) throw new Error("Gateway session closed");
@@ -463,6 +542,7 @@ export class KubernetesStore implements Store, RecordStore {
     const name = historyReaderName(workspace);
     let readerUid: string | undefined;
     try {
+      if (previousTurn) await bounded(() => previousTurn);
       check();
       const creation = this.readerPod(workspace, image, check);
       // A create already sent to Kubernetes can ACK after timeout or close.
@@ -525,6 +605,7 @@ export class KubernetesStore implements Store, RecordStore {
           this.deletePod(name, readerUid).catch(() => undefined),
           new Promise<void>((resolve) => setTimeout(resolve, 3000)),
         ]);
+      releaseTurn();
       this.activeHistoryReaders--;
     }
   }
