@@ -989,3 +989,53 @@ command activity and exact reply without resuming or resending. A subsequent
 read-only check confirmed the same workspace UID remained Suspended. This
 completes the manual stopped-conversation check; published-artifact qualification
 and EKS validation remain separate.
+
+## Stale-tab isolation and Desktop permissions — 2026-09-30
+
+Desktop 0.10.2 retained open tabs for deleted acceptance workspaces. Its timeline
+subscription included those stale agent IDs alongside two live conversations,
+and the gateway rejected the entire batch. A minimized live replay reproduced
+the error for each mixed batch while the same live agent alone subscribed
+successfully. The live workspace and Pod identities had not changed.
+
+The fix in #82 excludes unavailable durable routes from aggregate membership,
+acknowledges only accepted IDs, and preserves strict direct-request and
+authorization checks. It revalidates route and workspace identity after awaits;
+corrupt records and storage errors are not treated as missing agents. Focused
+regressions cover partial membership, clearing previous membership, and changed
+authority. The full repository check passed 446 unit tests and the separate
+release and qualification suites.
+
+The deployed gateway was built from `b2fa056`, digest
+`sha256:36cc2646ef9b9167ce20d2f027848f76e16c91f681a4c6ca7347d7d202f03f9e`;
+both workers retained
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+The exact mixed SDK replay passed for both live agents. Without removing the
+stale tabs, the operator then reopened conversation A and denied its pending
+tool request. A became idle with no pending permission or fixture file, while
+B's original request remained pending. The operator approved B; both agents
+became idle, and only B's expected file existed. Workspace and Pod identities
+stayed unchanged. This qualifies the Desktop permission controls and the
+stale-tab recovery on this local candidate.
+
+The operator also used **Reload agent** on idle B and confirmed the same history
+with no new prompt. Read-only verification preserved both agent IDs, prompt
+counts and tool records. Exact published-artifact qualification remains open;
+these results do not qualify the cancelled alpha.4 artifacts.
+
+A subsequent Stop fixture used a standalone sleep command, which the provider's
+tool harness rejected before execution. The single prompt and failed tool call
+were retained; the harness did not replay it or count it as a gateway Stop
+result. A separate permission-pending fixture is used to test the exposed Stop
+control without relying on that rejected command.
+
+The operator clicked **Stop agent** while the fresh harmless write awaited
+permission. B became idle, its pending permission cleared, and its marker file
+remained absent. A's prompt and tool records stayed unchanged; B retained exactly
+one new prompt and one distinct new tool-call ID. The first verifier incorrectly
+required a single terminal history row. Direct native-daemon and gateway reads
+both returned `canceled` followed by `failed` for that same call ID and matching
+sequence ranges. The corrected verifier counts distinct calls, requires terminal
+states including cancellation, and checks file absence and unchanged prompt IDs.
+It passed without resending or modifying the completed fixture. This qualifies
+Stop while awaiting permission, not cancellation of an executing shell command.
