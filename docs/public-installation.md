@@ -62,6 +62,7 @@ kind: PaseoCredentialProfile
 metadata:
   name: claude-default
 spec:
+  files: []
   env:
     - name: CLAUDE_CODE_OAUTH_TOKEN
       valueFrom:
@@ -82,8 +83,10 @@ YAML
 Do not paste tokens into shell arguments, Git, issues or chat. The file must
 contain the credential only, with no trailing newline. For API keys, file
 configuration, private SSH/HTTPS Git and custom runtime images, use
-[credential profiles](credential-profiles.md). Shared rotating Codex subscription
-logins are unsupported; see [credential renewal](credential-renewal.md).
+[credential profiles](credential-profiles.md). Codex subscription logins use a
+[single refresh authority](codex-subscription-authority.md) with access-only
+worker credentials. Sharing a rotating `auth.json` directly between workers
+remains unsupported; see [credential renewal](credential-renewal.md).
 
 ## Connect and run
 

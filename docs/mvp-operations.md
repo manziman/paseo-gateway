@@ -153,3 +153,12 @@ To verify an existing authorized PR without creating remote artifacts, use
 It compares the checkout with the remote PR ref, archives twice, verifies retained
 storage and unchanged existing agent inventory, and leaves its archived PVC for
 inspection. It does not invoke a provider or push repository changes.
+
+For the local live, authentication, and PR-checkout harnesses, verified gateway TLS
+is selected by setting both `PASEO_TEST_CA_FILE` (the operator's CA PEM path) and
+`PASEO_TEST_TLS_SERVER_NAME` (the certificate DNS name). Their loopback port-forward
+then uses HTTPS/WSS with certificate and hostname verification; a TLS failure does
+not retry plaintext. Omit both only for an existing plaintext loopback test
+installation. `PASEO_IDENTITY_SECRET` selects the gateway identity Secret (default
+`paseo-identity`). These options do not change the Docker Desktop context or select
+provider credentials. Do not print trust/identity configuration alongside reports.

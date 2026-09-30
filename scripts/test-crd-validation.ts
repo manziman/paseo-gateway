@@ -115,3 +115,61 @@ check(
   { ...project, spec: { ...project.spec, cache: { claimName: "cache", subPath: "../outside" } } },
   false,
 );
+
+const codexSubscription = {
+  authSecretRef: { name: "codex-authority", key: "auth.json" },
+  outputSecretName: "codex-access",
+};
+check("valid Codex authority", { ...profile, spec: { codexSubscription } }, true);
+for (const [label, spec] of [
+  [
+    "Codex same authority/output",
+    { codexSubscription: { ...codexSubscription, outputSecretName: "codex-authority" } },
+  ],
+  [
+    "Codex reserved authority key",
+    {
+      codexSubscription: {
+        ...codexSubscription,
+        authSecretRef: { name: "codex-authority", key: "paseo-access.json" },
+      },
+    },
+  ],
+  [
+    "Codex mixed auth modes",
+    { codexSubscription, env: [{ name: "OPENAI_API_KEY", valueFrom: secret }] },
+  ],
+  [
+    "Codex authority env leak",
+    {
+      codexSubscription,
+      env: [{ name: "LEAK", valueFrom: { secretKeyRef: codexSubscription.authSecretRef } }],
+    },
+  ],
+  [
+    "Codex authority file leak",
+    {
+      codexSubscription,
+      files: [
+        { path: ".config/leak", valueFrom: { secretKeyRef: codexSubscription.authSecretRef } },
+      ],
+    },
+  ],
+  [
+    "Codex authority SSH leak",
+    {
+      codexSubscription,
+      git: {
+        ssh: {
+          keySecretRef: secret.secretKeyRef,
+          knownHostsRef: { secretKeyRef: codexSubscription.authSecretRef },
+        },
+      },
+    },
+  ],
+  [
+    "Codex colliding App output",
+    { codexSubscription, git: { githubApp: { ...app, outputSecretName: "codex-access" } } },
+  ],
+] as const)
+  check(label, { ...profile, spec }, false);

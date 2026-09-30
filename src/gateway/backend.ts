@@ -15,6 +15,7 @@ export interface Backend {
   request(message: SessionInboundMessage): Promise<SessionOutboundMessage>;
   send(message: SessionInboundMessage): void;
   binary(data: Uint8Array): void;
+  binaryPaced?(data: Uint8Array): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -22,6 +23,7 @@ export interface Backend {
 export class PaseoBackend implements Backend {
   private readonly client: DaemonClient;
   private transport?: DaemonTransport;
+  private socket?: WebSocket;
   private readonly pending = new Map<
     string,
     {
@@ -46,6 +48,7 @@ export class PaseoBackend implements Backend {
         maxPayload: 8 * 1024 * 1024,
         perMessageDeflate: false,
       });
+      this.socket = socket;
       // Expose the EventEmitter surface only; ws's browser overloads are narrower than the SDK adapter.
       return {
         get readyState() {
@@ -70,7 +73,23 @@ export class PaseoBackend implements Backend {
       clientType: "cli",
       reconnect: { enabled: false },
       connectTimeoutMs: 10000,
-      capabilities: hello.capabilities,
+      // The gateway owns the aggregate selective timeline membership for this backend
+      // connection. The SDK otherwise advertises owned_subscriptions by default,
+      // which suppresses native implicit broadcasts without a matching owner here.
+      // Legacy selective mode replaces the complete timeline set on each request.
+      capabilities: {
+        ...hello.capabilities,
+        owned_subscriptions: false,
+        selective_agent_timeline: true,
+        // This backend transport forwards native event pushes to the desktop,
+        // but does not register explicit event subscriptions with the daemon.
+        // The SDK defaults would otherwise suppress provider catalog updates.
+        explicit_event_subscriptions: false,
+        // The gateway has no native content-hash cache for this connection.
+        // Forward ordinary full entries so a new desktop session can hydrate them.
+        compact_provider_snapshots: false,
+        provider_snapshot_references: false,
+      },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
       transportFactory: (options) => {
         const transport = factory(options);
@@ -103,6 +122,7 @@ export class PaseoBackend implements Backend {
         });
         transport.onClose(() => {
           this.transport = undefined;
+          this.socket = undefined;
           this.rejectPending();
           this.onDisconnect();
         });
@@ -124,6 +144,16 @@ export class PaseoBackend implements Backend {
   binary(data: Uint8Array) {
     if (!this.transport) throw new Error("Workspace disconnected");
     this.transport.send(data);
+  }
+
+  async binaryPaced(data: Uint8Array) {
+    const deadline = Date.now() + 60_000;
+    while (this.socket && this.socket.bufferedAmount > 4 * 1024 * 1024) {
+      if (Date.now() >= deadline)
+        throw new Error("Workspace upload backpressure timeout; inspect before retrying");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    this.binary(data);
   }
 
   request(message: SessionInboundMessage): Promise<SessionOutboundMessage> {

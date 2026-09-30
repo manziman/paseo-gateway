@@ -22,8 +22,10 @@ mount are read-only. The daemon cannot access it. Missing, malformed, or shallow
 Git repositories fall back to a normal fetch. Checkout may borrow objects through
 a temporary Git alternate, then runs a full repack and removes the alternate
 before writing the ready marker. Deleting or garbage-collecting the reference
-cache afterward cannot remove the workspace's objects. A cache-assisted fetch
-failure removes the alternate and attempts a cold fetch once. The initializer does not
+cache afterward cannot remove the workspace's objects. A fetch failure identified
+as missing or corrupt alternate data removes the alternate and attempts a cold
+fetch within the same three-attempt, 150-second fetch budget. Authentication,
+revision, and unclassified errors do not trigger this cache fallback. The initializer does not
 write to the cache or copy its working-tree contents, hooks, or credential
 configuration into the workspace. A successful checkout test deletes the reference and runs `git fsck
 --full` to verify independence.

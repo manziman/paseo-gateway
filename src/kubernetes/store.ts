@@ -18,8 +18,9 @@ export interface Store {
   setResidency(workspace: Workspace, residency: Workspace["spec"]["residency"]): Promise<void>;
   status(workspace: Workspace, status: WorkspaceStatus): Promise<void>;
   get(kind: InfrastructureKind, name: string): Promise<Infrastructure | undefined>;
-  create(object: Infrastructure): Promise<void>;
+  create(object: Infrastructure): Promise<Infrastructure>;
   deletePod(name: string, uid: string): Promise<void>;
+  deleteService(name: string, uid: string): Promise<void>;
   secret(name: string): Promise<V1Secret>;
   credentialProfile(name: string): Promise<CredentialProfile | undefined>;
   configMap(name: string): Promise<V1ConfigMap>;
@@ -27,6 +28,19 @@ export interface Store {
   deleteStorage(name: string, uid: string): Promise<void>;
   /** Remove owned terminal workspace Service/access Secret; true only after both are absent. */
   deleteRuntime(workspace: Workspace): Promise<boolean>;
+  /** Optional on non-Kubernetes test stores; production uses a private PVC snapshot. */
+  supportsRetainedHistory?(workspace: Workspace): Promise<boolean>;
+  writeRetainedHistory?(workspace: Workspace, payload: Buffer): Promise<string>;
+  pruneRetainedHistory?(workspace: Workspace, fileName?: string): Promise<void>;
+  readRetainedHistory?(
+    workspace: Workspace,
+    agentId: string,
+    image: string,
+    fileName: string,
+    deadlineAt?: number,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
+  cleanupRetainedHistoryReaders?(): Promise<void>;
 }
 
 export function statusCode(error: unknown): number | undefined {

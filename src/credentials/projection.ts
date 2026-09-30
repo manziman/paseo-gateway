@@ -22,6 +22,12 @@ export function referencedCredentials(profile: CredentialProfile): CredentialRef
     else if (item.valueFrom.configMapKeyRef)
       references.push({ kind: "ConfigMap", ...item.valueFrom.configMapKeyRef });
   }
+  if (profile.spec.codexSubscription)
+    references.push({
+      kind: "Secret",
+      name: profile.spec.codexSubscription.outputSecretName,
+      key: "access.json",
+    });
   if (profile.spec.git?.tokenSecretRef)
     references.push({ kind: "Secret", ...profile.spec.git.tokenSecretRef });
   if (profile.spec.git?.githubApp)
@@ -96,6 +102,17 @@ export function credentialProjection(
       subPath: "value",
       readOnly: true,
     });
+  }
+  if (profile?.spec.codexSubscription) {
+    volumes.push({
+      name: "codex-access",
+      secret: {
+        secretName: profile.spec.codexSubscription.outputSecretName,
+        items: [{ key: "access.json", path: "access.json", mode: 0o440 }],
+      },
+    });
+    daemonMounts.push({ name: "codex-access", mountPath: "/run/paseo-codex", readOnly: true });
+    env.push({ name: "PASEO_CODEX_ACCESS_FILE", value: "/run/paseo-codex/access.json" });
   }
   const git = profile?.spec.git;
   const gitConfig: [string, string][] = [];

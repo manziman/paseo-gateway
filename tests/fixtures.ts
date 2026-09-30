@@ -76,10 +76,18 @@ export class MemoryStore implements Store {
     const key = `${input.kind}/${input.metadata?.name}`;
     if (this.objects.has(key)) throw { code: 409 };
     this.writes++;
-    this.objects.set(key, { ...input, metadata: { ...input.metadata, uid: randomUUID() } });
+    const created = { ...input, metadata: { ...input.metadata, uid: randomUUID() } };
+    this.objects.set(key, created);
+    return created;
   }
   async deletePod(name: string, uid: string) {
     const key = `Pod/${name}`;
+    if (this.objects.get(key)?.metadata?.uid !== uid) throw { code: 409 };
+    this.deletions.push(name);
+    this.objects.delete(key);
+  }
+  async deleteService(name: string, uid: string) {
+    const key = `Service/${name}`;
     if (this.objects.get(key)?.metadata?.uid !== uid) throw { code: 409 };
     this.deletions.push(name);
     this.objects.delete(key);

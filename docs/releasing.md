@@ -27,6 +27,9 @@ All per-platform version/CLI smoke, inventory and vulnerability checks run durin
 staging. AMD64 upstream daemon contracts run there too. The draft's exact image
 digests then pass gateway/runtime and upstream daemon contracts on a native
 `ubuntu-24.04-arm` runner before any GitHub signed attestations are produced.
+The native job also runs the bounded validator-memory regression against the
+exact pulled gateway image and records its result in the native verification
+asset. A missing, failing or baseline-mode result prevents signing.
 The native job anchors the downloaded checksum list to the staging job output,
 verifies every draft asset, signs only the expected versioned chart, attaches its
 `native-arm64-verification.json` record and signed bundles, and updates checksums.

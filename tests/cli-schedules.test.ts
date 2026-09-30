@@ -1,13 +1,14 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import { z } from "zod";
 import { type ScheduleDispatch, ScheduleService } from "../src/gateway/schedules.js";
 import { startGateway } from "../src/gateway/server.js";
-import { MemoryStore } from "./fixtures.js";
+import { MemoryStore, workspace } from "./fixtures.js";
 import { MemoryRecordStore } from "./record-store.js";
 
 /** Official 0.9.1 CLI executable -> real gateway -> real durable scheduler.
@@ -18,16 +19,30 @@ it.skipIf(!process.env.PASEO_CLI_BIN)(
   async () => {
     const home = await mkdtemp(join(tmpdir(), "paseo-cli-schedules-"));
     const store = new MemoryStore();
+    store.workspaceRows = [workspace()];
     const records = new MemoryRecordStore();
     const dispatched: ScheduleDispatch[] = [];
+    const existingAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     let complete = false;
     const schedules = new ScheduleService({
       store,
       records,
       now: () => new Date("2026-09-24T00:00:00Z"),
+      resolveAgent: async (agentId) => {
+        if (agentId !== existingAgentId) throw new Error("Scheduled target agent does not exist");
+        return {
+          projectId: "example",
+          credentialProfile: "claude-default",
+          workspaceId: "one",
+          workspaceUid: "uid-one",
+        };
+      },
       dispatch: async (input) => {
         dispatched.push(input);
-        return { workspaceId: "schedule-worker", agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+        return {
+          workspaceId: input.targetWorkspaceId ?? "schedule-worker",
+          agentId: existingAgentId,
+        };
       },
       observe: async () =>
         complete ? { status: "succeeded", output: "fixture scheduled result" } : undefined,
@@ -50,6 +65,15 @@ it.skipIf(!process.env.PASEO_CLI_BIN)(
     try {
       const address = gateway.server.address();
       if (!address || typeof address === "string") throw new Error("Missing test listener");
+      const tokenFile = join(home, "gateway-token");
+      const remapFile = join(home, "remap-cli.mjs");
+      await writeFile(tokenFile, "fixture-owner-password\n", { mode: 0o600 });
+      // Exercise the production wrapper against the official, unmodified CLI.
+      // Remap only its image-local executable path in this test process.
+      await writeFile(
+        remapFile,
+        `import childProcess from 'node:child_process';\nimport { syncBuiltinESMExports } from 'node:module';\nconst spawn = childProcess.spawn;\nchildProcess.spawn = (binary, args, options) => spawn(binary === '/usr/local/bin/paseo' ? process.env.PASEO_CLI_BIN : binary, args, options);\nsyncBuiltinESMExports();\n`,
+      );
       const cli = async (...args: string[]): Promise<unknown> => {
         const result = await promisify(execFile)(
           process.execPath,
@@ -71,6 +95,28 @@ it.skipIf(!process.env.PASEO_CLI_BIN)(
               PASEO_HOST: undefined,
               PASEO_AGENT_ID: undefined,
               PASEO_WORKSPACE_ID: undefined,
+            },
+          },
+        );
+        return JSON.parse(result.stdout);
+      };
+      const heartbeat = async (agentId: string, ...args: string[]): Promise<unknown> => {
+        const result = await promisify(execFile)(
+          process.execPath,
+          [join(process.cwd(), "docker/paseo-cli.mjs"), "heartbeat", ...args, "--json"],
+          {
+            timeout: 15000,
+            env: {
+              ...process.env,
+              HOME: home,
+              PASEO_HOME: join(home, ".paseo"),
+              PASEO_HOST: undefined,
+              PASEO_GATEWAY_URL: `ws://127.0.0.1:${address.port}/ws`,
+              PASEO_GATEWAY_TOKEN_FILE: tokenFile,
+              PASEO_CLUSTER_WORKSPACE_ID: "one",
+              PASEO_AGENT_ID: agentId,
+              NODE_OPTIONS:
+                `${process.env.NODE_OPTIONS ?? ""} --import=${pathToFileURL(remapFile).href}`.trim(),
             },
           },
         );
@@ -183,6 +229,50 @@ it.skipIf(!process.env.PASEO_CLI_BIN)(
       expect(await cli("ls")).toEqual([]);
       expect(await records.records("schedule-run")).toHaveLength(0);
       await expect(cli("inspect", id)).rejects.toMatchObject({ code: 1 });
+      const existing = await cli(
+        "create",
+        "Prompt the existing agent",
+        "--every",
+        "5m",
+        "--target",
+        existingAgentId,
+        "--cwd",
+        "/projects/example",
+      );
+      const existingScheduleId = z.object({ id: z.string().uuid() }).parse(existing).id;
+      expect((await records.records("schedule"))[0]?.value).toMatchObject({
+        targetWorkspaceId: "one",
+        targetWorkspaceUid: "uid-one",
+        schedule: { target: { type: "agent", agentId: existingAgentId } },
+      });
+      // The pinned CLI hides non-new-agent schedules from these commands even
+      // though create/delete and the SDK protocol support them.
+      expect(await cli("ls")).toEqual([]);
+      await expect(cli("inspect", existingScheduleId)).rejects.toMatchObject({ code: 1 });
+      await expect(cli("run-once", existingScheduleId)).rejects.toMatchObject({ code: 1 });
+      expect(await cli("delete", existingScheduleId)).toMatchObject({ id: existingScheduleId });
+      const scopedAgentId = `one~${Buffer.from(existingAgentId).toString("base64url")}`;
+      const heartbeatCreated = await heartbeat(
+        scopedAgentId,
+        "create",
+        "Keep this agent active",
+        "--cron",
+        "*/10 * * * *",
+      );
+      const heartbeatId = z.object({ id: z.string().uuid() }).parse(heartbeatCreated).id;
+      expect((await records.record("schedule", heartbeatId))?.value).toMatchObject({
+        targetWorkspaceId: "one",
+        targetWorkspaceUid: "uid-one",
+        schedule: { target: { type: "agent", agentId: existingAgentId } },
+      });
+      expect(
+        await heartbeat(scopedAgentId, "update", heartbeatId, "--cron", "0 * * * *"),
+      ).toMatchObject({ id: heartbeatId, cadence: "cron:0 * * * *" });
+      expect(await heartbeat(scopedAgentId, "delete", heartbeatId)).toEqual({
+        id: heartbeatId,
+        status: "deleted",
+      });
+      expect(await records.record("schedule", heartbeatId)).toBeUndefined();
       await expect(
         cli(
           "create",
@@ -202,7 +292,7 @@ it.skipIf(!process.env.PASEO_CLI_BIN)(
           "--every",
           "5m",
           "--target",
-          "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
           "--cwd",
           "/projects/example",
         ),

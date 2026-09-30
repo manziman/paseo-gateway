@@ -10,14 +10,14 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "node --import tsx --watch src/main.ts",
-    "start": "node dist/main.js",
+    "dev": "node --no-maglev --import tsx --watch src/main.ts",
+    "start": "node --no-maglev dist/main.js",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm run lint && npm test && npm run test:pr-title && npm run test:release && npm run build",
+    "check": "npm run typecheck && npm run lint && npm test && npm run test:pr-title && npm run test:release && npm run test:qualification && npm run build",
     "dev:doctor": "bash scripts/doctor.sh",
     "dev:up": "bash scripts/dev-up.sh",
     "dev:connect": "bash scripts/connect.sh",
@@ -30,9 +30,14 @@
     "generate:crds": "node --import tsx scripts/generate-crds.ts",
     "credentials": "node --import tsx scripts/credentials.ts",
     "test:upstream": "node --import tsx scripts/upstream-test.ts",
+    "test:validator-memory": "node scripts/validator-memory.mjs",
+    "test:provider-probe": "node --import tsx scripts/provider-probe-contract.ts",
     "release": "semantic-release",
     "test:release": "node --test tests/release*.mjs",
-    "test:pr-title": "node --test scripts/check-pr-title.test.mjs"
+    "test:pr-title": "node --test scripts/check-pr-title.test.mjs",
+    "test:qualification": "node --test tests/eks*.mjs tests/client-acceptance*.mjs tests/local-transport-probe.test.mjs",
+    "test:providers": "node --import tsx scripts/provider-live.ts",
+    "test:github-app": "node --import tsx scripts/github-app-live.ts"
   },
   "repository": {
     "type": "git",
