@@ -88,6 +88,15 @@ and exact reply without resuming or resending. The workspace remained Suspended
 with the same UID. This completes the manual stopped-history check for the
 recorded candidate; older uncaptured histories retain the documented limits.
 
+The same Desktop 0.10.2 session subsequently passed permission denial in one
+workspace and approval in another, with stale tabs for deleted fixtures left
+open. Read-only checks confirmed that denial left the other request pending and
+only the approved write created its file. Idle **Reload agent** also preserved
+the same conversation and prompt count. **Stop agent** subsequently cancelled a
+fresh permission-pending write without creating its file or changing the other
+agent. This does not establish cancellation of an already executing shell.
+See the [local evidence](local-parity-qualification.md#stale-tab-isolation-and-desktop-permissions--2026-09-30).
+
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.
 
 Existing suspended acceptance fixtures can have red workspace dots: the pinned

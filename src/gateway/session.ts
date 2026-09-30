@@ -117,6 +117,25 @@ const providerRequests = new Set([
   "provider.usage.list.request",
 ]);
 
+interface FileSubscriptionBinding {
+  workspaceId: string;
+  workspaceUid: string;
+  cwd: string;
+  path: string;
+  state: "subscribing" | "active" | "releasing";
+  pendingUpdate?: JsonObject;
+}
+
+function relativeFilePath(cwd: string, path: string): string {
+  const root = posix.normalize(cwd);
+  const relative = posix.isAbsolute(path)
+    ? posix.relative(root, posix.normalize(path))
+    : posix.normalize(path);
+  if (relative === ".." || relative.startsWith("../") || posix.isAbsolute(relative))
+    throw new Error("File path is outside the selected workspace");
+  return relative;
+}
+
 export interface SessionOptions {
   checkoutRpcTimeoutMs?: number;
   projectRefRpcTimeoutMs?: number;
@@ -180,6 +199,7 @@ export class GatewaySession {
   private lastActiveAgentIds = new Map<string, string>(); // Public ID -> workspace UID.
   private readonly uploads: UploadStaging;
   private readonly subscriptions = new Map<string, string>();
+  private readonly fileSubscriptions = new Map<string, FileSubscriptionBinding>();
   private readonly providerWatches = new Map<string, { projectUid: string; release: () => void }>();
   private readonly providerReadinessWaits = new Map<string, Promise<Workspace>>();
   private readonly providerInterests = new Map<
@@ -294,6 +314,51 @@ export class GatewaySession {
           }
           const translated = object(await this.project(message, workspace, localId));
           if (this.closed || retired) return;
+          if (message.type === "fs.file.update") {
+            const binding = this.fileSubscriptions.get(message.payload.subscriptionId);
+            let path: string;
+            try {
+              path = relativeFilePath(message.payload.version.cwd, message.payload.version.path);
+            } catch {
+              return;
+            }
+            if (
+              binding?.workspaceId !== id ||
+              binding.workspaceUid !== workspace.metadata.uid ||
+              binding.state === "releasing" ||
+              posix.normalize(message.payload.version.cwd) !== posix.normalize(binding.cwd) ||
+              path !== binding.path
+            )
+              return;
+            const { workspaces } = await this.records();
+            const current = workspaces.find((row) => row.metadata.name === id);
+            if (
+              !current ||
+              current.metadata.uid !== workspace.metadata.uid ||
+              current.metadata.deletionTimestamp ||
+              current.spec.residency !== "Running" ||
+              current.status?.phase !== "Ready"
+            )
+              return;
+            const currentBinding = this.fileSubscriptions.get(message.payload.subscriptionId);
+            if (
+              this.closed ||
+              retired ||
+              currentBinding !== binding ||
+              currentBinding.state === "releasing"
+            )
+              return;
+            if (currentBinding.state === "subscribing") {
+              // Native may publish a version before its subscribe response.
+              // Retain only the newest bounded update until the client sees ACK.
+              if (eventBytes > 64 * 1024) {
+                this.options.disconnect();
+                return;
+              }
+              currentBinding.pendingUpdate = translated;
+              return;
+            }
+          }
           if (message.type === "providers_snapshot_update") {
             const payload = object(translated.payload);
             if (
@@ -1775,7 +1840,19 @@ export class GatewaySession {
     ) {
       throw new Error(`Operation ${message.type} is not supported by this POC`);
     }
-    if (
+    if (message.type === "fs.file.unsubscribe.request") {
+      const binding = this.fileSubscriptions.get(message.subscriptionId);
+      if (!binding) {
+        // Native release is idempotent. An unknown ID has no workspace to route
+        // and no authority to gain; acknowledge it after the origin check above.
+        this.options.emit({
+          type: "fs.file.unsubscribe.response",
+          payload: { subscriptionId: message.subscriptionId, requestId: message.requestId },
+        });
+        return;
+      }
+      record.workspaceId = binding.workspaceId;
+    } else if (
       typeof record.subscriptionId === "string" &&
       !record.cwd &&
       this.subscriptions.has(record.subscriptionId)
@@ -1824,6 +1901,8 @@ export class GatewaySession {
     );
     if (input.type === "send_agent_message_request")
       input = await this.uploads.replace(input, connection.backend, validate);
+    if (input.type === "fs.file.write.request" || input.type === "fs.file.subscribe.request")
+      relativeFilePath(input.cwd, input.path);
     await validate();
     if (this.options.agentRouting) {
       // A UUID can be quarantined by another session while connect/upload waits.
@@ -1833,7 +1912,11 @@ export class GatewaySession {
     // exact workspace state after it, immediately before sending the mutation.
     await validate();
     const record = object(message);
-    if (typeof record.subscriptionId === "string")
+    if (
+      input.type !== "fs.file.subscribe.request" &&
+      input.type !== "fs.file.unsubscribe.request" &&
+      typeof record.subscriptionId === "string"
+    )
       this.subscriptions.set(record.subscriptionId, workspace.metadata.name);
     if (
       input.type === "agent_permission_response" ||
@@ -1851,29 +1934,151 @@ export class GatewaySession {
       connection.backend.send(input);
       return;
     }
-    const reply = await connection.backend.request(input);
-    await connection.enqueue(async () => {
-      const result = object(await this.project(reply, workspace, connection.localId));
-      if (reply.type === "file_download_token_response" && reply.payload.token) {
-        const handles = this.options.downloadHandles;
-        if (!handles) throw new Error("Gateway download routing is unavailable");
-        object(result.payload).token = handles.issue({
-          workspace,
-          principal: this.options.principal ?? { kind: "owner" },
-          backendToken: reply.payload.token,
-          mimeType: reply.payload.mimeType,
-          fileName: reply.payload.fileName,
-          size: reply.payload.size,
-        });
+    let fileBinding: FileSubscriptionBinding | undefined;
+    let previousFileBinding: FileSubscriptionBinding | undefined;
+    let fileSubscriptionId: string | undefined;
+    let fileReleaseId: string | undefined;
+    if (input.type === "fs.file.subscribe.request") {
+      // The native legacy owner uses the requested ID as its slot. Generate one
+      // when omitted so multiple raw subscriptions remain independently releasable.
+      const subscriptionId = input.subscriptionId?.trim() || randomUUID();
+      const path = relativeFilePath(input.cwd, input.path);
+      if (subscriptionId.length > 256 || input.cwd.length > 4096 || path.length > 4096)
+        throw new Error("File subscription target is too long");
+      input = { ...input, subscriptionId };
+      fileSubscriptionId = subscriptionId;
+      previousFileBinding = this.fileSubscriptions.get(subscriptionId);
+      if (
+        previousFileBinding &&
+        (previousFileBinding.workspaceId !== workspace.metadata.name ||
+          previousFileBinding.workspaceUid !== workspace.metadata.uid ||
+          previousFileBinding.cwd !== input.cwd ||
+          previousFileBinding.path !== path ||
+          previousFileBinding.state !== "active")
+      )
+        throw new Error("File subscription ID is already bound to another target");
+      if (this.fileSubscriptions.size >= 256 && !previousFileBinding)
+        throw new Error("File subscription capacity reached");
+      fileBinding = {
+        workspaceId: workspace.metadata.name,
+        workspaceUid: workspace.metadata.uid ?? "",
+        cwd: input.cwd,
+        path,
+        state: "subscribing",
+      };
+      this.fileSubscriptions.set(subscriptionId, fileBinding);
+    } else if (input.type === "fs.file.unsubscribe.request") {
+      fileReleaseId = input.subscriptionId;
+      fileBinding = this.fileSubscriptions.get(input.subscriptionId);
+      if (
+        !fileBinding ||
+        fileBinding.workspaceId !== workspace.metadata.name ||
+        fileBinding.workspaceUid !== workspace.metadata.uid ||
+        fileBinding.state !== "active"
+      )
+        throw new Error("File subscription is unavailable or replaced");
+      fileBinding.state = "releasing";
+    }
+    const rollbackFileBinding = () => {
+      if (fileSubscriptionId && fileBinding) {
+        if (this.fileSubscriptions.get(fileSubscriptionId) === fileBinding) {
+          if (previousFileBinding)
+            this.fileSubscriptions.set(fileSubscriptionId, previousFileBinding);
+          else this.fileSubscriptions.delete(fileSubscriptionId);
+        }
+      } else if (fileReleaseId && fileBinding) {
+        if (this.fileSubscriptions.get(fileReleaseId) === fileBinding) fileBinding.state = "active";
       }
-      if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
-        object(result.payload).slot = this.slots.outward(
-          workspace.metadata.name,
-          reply.payload.slot,
-        );
+    };
+    let reply: SessionOutboundMessage;
+    try {
+      reply = await connection.backend.request(input);
+      if (input.type === "fs.file.subscribe.request") {
+        if (reply.type !== "fs.file.subscribe.response" || !fileBinding)
+          throw new Error("Native file subscription response is invalid");
+        const requestedId = input.subscriptionId ?? "";
+        const responseId = reply.payload.subscriptionId;
+        // The pinned native daemon echoes caller IDs. Reject a changed ID so a
+        // delayed response cannot claim another Pod's subscription.
+        if (responseId !== requestedId) throw new Error("Native file subscription ID changed");
+        await validate();
+        if (this.fileSubscriptions.get(requestedId) !== fileBinding)
+          throw new Error("File subscription changed during registration");
+        if (reply.payload.initial.status === "error") {
+          // Native releases the watcher before returning this error status.
+          // Deliver the response but do not retain an unusable binding.
+          this.fileSubscriptions.delete(requestedId);
+        }
+      } else if (input.type === "fs.file.unsubscribe.request") {
+        if (
+          reply.type !== "fs.file.unsubscribe.response" ||
+          reply.payload.subscriptionId !== input.subscriptionId
+        )
+          throw new Error("Native file release response is invalid");
+        await validate();
+        if (this.fileSubscriptions.get(input.subscriptionId) === fileBinding)
+          this.fileSubscriptions.delete(input.subscriptionId);
       }
-      this.options.emit(result);
-    });
+    } catch (error) {
+      rollbackFileBinding();
+      if (fileSubscriptionId || fileReleaseId) this.options.disconnect();
+      throw error;
+    }
+    try {
+      await connection.enqueue(async () => {
+        const result = object(await this.project(reply, workspace, connection.localId));
+        if (reply.type === "file_download_token_response" && reply.payload.token) {
+          const handles = this.options.downloadHandles;
+          if (!handles) throw new Error("Gateway download routing is unavailable");
+          object(result.payload).token = handles.issue({
+            workspace,
+            principal: this.options.principal ?? { kind: "owner" },
+            backendToken: reply.payload.token,
+            mimeType: reply.payload.mimeType,
+            fileName: reply.payload.fileName,
+            size: reply.payload.size,
+          });
+        }
+        if (reply.type === "subscribe_terminal_response" && "slot" in reply.payload) {
+          object(result.payload).slot = this.slots.outward(
+            workspace.metadata.name,
+            reply.payload.slot,
+          );
+        }
+        if (
+          reply.type === "fs.file.subscribe.response" ||
+          reply.type === "fs.file.unsubscribe.response"
+        )
+          await validate();
+        if (
+          reply.type === "fs.file.subscribe.response" &&
+          reply.payload.initial.status !== "error"
+        ) {
+          if (
+            this.fileSubscriptions.get(reply.payload.subscriptionId) !== fileBinding ||
+            fileBinding?.state !== "subscribing"
+          )
+            throw new Error("File subscription changed before acknowledgement");
+          fileBinding.state = "active";
+        }
+        this.options.emit(result);
+        if (
+          reply.type === "fs.file.subscribe.response" &&
+          reply.payload.initial.status !== "error" &&
+          fileBinding?.pendingUpdate &&
+          this.fileSubscriptions.get(reply.payload.subscriptionId) === fileBinding &&
+          fileBinding.state === "active"
+        ) {
+          this.options.emit(fileBinding.pendingUpdate);
+          fileBinding.pendingUpdate = undefined;
+        }
+      });
+    } catch (error) {
+      // A failed acknowledgement must not leave a live native file watcher
+      // attached to a binding the client cannot release reliably.
+      if (fileSubscriptionId || fileReleaseId) this.options.disconnect();
+      throw error;
+    }
   }
 
   async binary(data: Uint8Array) {
@@ -2022,6 +2227,7 @@ export class GatewaySession {
     this.workspaceRuntime.clear();
     this.uploads.clear();
     this.subscriptions.clear();
+    this.fileSubscriptions.clear();
   }
 
   invalidateAgentDirectory() {
