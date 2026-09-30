@@ -989,3 +989,108 @@ command activity and exact reply without resuming or resending. A subsequent
 read-only check confirmed the same workspace UID remained Suspended. This
 completes the manual stopped-conversation check; published-artifact qualification
 and EKS validation remain separate.
+
+## Stale-tab isolation and Desktop permissions — 2026-09-30
+
+Desktop 0.10.2 retained open tabs for deleted acceptance workspaces. Its timeline
+subscription included those stale agent IDs alongside two live conversations,
+and the gateway rejected the entire batch. A minimized live replay reproduced
+the error for each mixed batch while the same live agent alone subscribed
+successfully. The live workspace and Pod identities had not changed.
+
+The fix in #82 excludes unavailable durable routes from aggregate membership,
+acknowledges only accepted IDs, and preserves strict direct-request and
+authorization checks. It revalidates route and workspace identity after awaits;
+corrupt records and storage errors are not treated as missing agents. Focused
+regressions cover partial membership, clearing previous membership, and changed
+authority. The full repository check passed 446 unit tests and the separate
+release and qualification suites.
+
+The deployed gateway was built from `b2fa056`, digest
+`sha256:36cc2646ef9b9167ce20d2f027848f76e16c91f681a4c6ca7347d7d202f03f9e`;
+both workers retained
+`sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
+The exact mixed SDK replay passed for both live agents. Without removing the
+stale tabs, the operator then reopened conversation A and denied its pending
+tool request. A became idle with no pending permission or fixture file, while
+B's original request remained pending. The operator approved B; both agents
+became idle, and only B's expected file existed. Workspace and Pod identities
+stayed unchanged. This qualifies the Desktop permission controls and the
+stale-tab recovery on this local candidate.
+
+The operator also used **Reload agent** on idle B and confirmed the same history
+with no new prompt. Read-only verification preserved both agent IDs, prompt
+counts and tool records. Exact published-artifact qualification remains open;
+these results do not qualify the cancelled alpha.4 artifacts.
+
+A subsequent Stop fixture used a standalone sleep command, which the provider's
+tool harness rejected before execution. The single prompt and failed tool call
+were retained; the harness did not replay it or count it as a gateway Stop
+result. A separate permission-pending fixture is used to test the exposed Stop
+control without relying on that rejected command.
+
+The operator clicked **Stop agent** while the fresh harmless write awaited
+permission. B became idle, its pending permission cleared, and its marker file
+remained absent. A's prompt and tool records stayed unchanged; B retained exactly
+one new prompt and one distinct new tool-call ID. The first verifier incorrectly
+required a single terminal history row. Direct native-daemon and gateway reads
+both returned `canceled` followed by `failed` for that same call ID and matching
+sequence ranges. The corrected verifier counts distinct calls, requires terminal
+states including cancellation, and checks file absence and unchanged prompt IDs.
+It passed without resending or modifying the completed fixture. This qualifies
+Stop while awaiting permission, not cancellation of an executing shell command.
+
+
+## Desktop file subscriptions and gateway replacement — 2026-09-30
+
+The file pane requires `workspaceFileEditing`; the gateway now advertises it
+with subscriptions bound to the workspace UID and normalized path. Independent
+review and regressions cover cross-workspace ID collisions, authority changes,
+registration/release races, bounded metadata, failed initial subscriptions and
+acknowledgement-before-update ordering. The full check passed 449 unit tests,
+14 PR-title checks, 38 release checks and 19 qualification checks, plus lint,
+type checking and build.
+
+The local gateway built from `e2e7a3b` was deployed at
+`sha256:b6abbdbd5fe21e047435fa92e84b8669493933f4494a4c40cfcdb706db83ad45`.
+The two test workspace Pods and terminal IDs remained unchanged. The SDK read
+both retained terminal markers with no cross-workspace output after the gateway
+Pod UID changed. A separate one-shot live SDK file probe passed create, read,
+subscribe, versioned write, live update and unsubscribe; a later write produced
+no callback on the released subscription. The operator then used those same open terminal tabs to print new distinct
+markers. Both accepted input and showed only their own output without creating
+new terminals. The operator then opened the prepared text file through the
+built-in Files panel, edited it and saved. A read-only SDK verification confirmed
+the exact expected contents in A and file absence in B, with the same workspace
+and Pod identities. The workspace menu’s **Open in file manager** instead
+invokes the desktop operating system’s file manager; that local action cannot
+open a Kubernetes workspace path. Use the built-in Files panel for remote files.
+
+A verified-TLS wire probe rejected an invalid owner password with HTTP 401.
+Owner and short-lived workspace-scoped sessions returned the expected feature
+and permission snapshots, read the permitted project and agent, and denied
+scoped token minting. The scoped project list contained only its authorized
+project. This compares the advertised role surface with recorded handler and
+live evidence; it is not a fresh execution of every advertised mutation.
+
+Before replacement, the old gateway accepted the authenticated connection but
+closed it while fetching the first test agent. The forwarding helper had no
+contemporaneous failure, and both workspace Pods were Ready with zero restarts.
+After replacement, both direct native and gateway-mediated fetches passed. The
+pre-replacement closure trigger was not captured, so recovery does not establish
+its root cause. No workspace restart or prompt replay was used.
+
+
+The operator closed both root agent chat tabs without errors. Both agents had
+`archivedAt` set and no pending permission. The initial verifier expected the
+live message IDs and sequence numbers to remain identical; native archival
+reconstructed B's transcript with different IDs and sequence numbers. Direct
+native and gateway reads returned the same complete timeline, and all three
+user-message content hashes matched the original submitted prompts in order.
+The corrected verifier checks the original prompt count, content and order;
+it passed without resending a prompt or modifying either archived agent.
+The operator then archived both disposable workspaces through their sidebar
+menus without errors. Read-only verification confirmed both original workspace
+UIDs reached Archived, their Pods were absent, and the original PVC identities
+were preserved. All fourteen local client matrix rows now have passing evidence
+within the agreed scope; exact-artifact and EKS qualification remain separate.

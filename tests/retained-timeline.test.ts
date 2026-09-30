@@ -493,7 +493,7 @@ describe("retained timeline opening", () => {
     }
   });
 
-  it("rejects missing or replaced retained data without backend access", async () => {
+  it("rejects missing retained data and omits replaced subscription routes without backend access", async () => {
     const f = await fixture();
     try {
       const record = await f.records.record("agent-inventory", f.row.metadata.uid ?? "");
@@ -511,7 +511,16 @@ describe("retained timeline opening", () => {
         requestId: "replaced",
         agentIds: [agentId],
       });
-      expect(replaced).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
+      expect(replaced).toContainEqual({
+        type: "agent.timeline.set_subscription.response",
+        payload: { requestId: "replaced", agentIds: [] },
+      });
+      const direct = await request(f, {
+        type: "fetch_agent_timeline_request",
+        requestId: "direct-replaced",
+        agentId,
+      });
+      expect(direct).toContainEqual(expect.objectContaining({ type: "rpc_error" }));
       expect(f.backendOpened()).toBe(0);
     } finally {
       await f.session.close();

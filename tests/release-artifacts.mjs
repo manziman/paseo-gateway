@@ -112,6 +112,37 @@ test("native Helm packaging is deterministic and embeds exact image digests", (t
   assert.match(metadata, /version: 1.0.0-alpha.1/);
   assert.match(metadata, /appVersion: 1.0.0-alpha.1/);
 });
+test("chart bad-image upgrade clears the published digest so a missing tag is exercised", (t) => {
+  const output = temporary(t);
+  const images = {
+    gateway: { repository: "ghcr.io/manziman/paseo-gateway", digest },
+    workspace: { repository: "ghcr.io/manziman/paseo-workspace", digest },
+  };
+  const chart = packageChart(version, images, output);
+  const render = (...args) =>
+    execFileSync(
+      "helm",
+      ["template", "paseo", chart, "--namespace", "chart-negative-test", ...args],
+      {
+        encoding: "utf8",
+      },
+    );
+  const taggedWithoutClear = render("--set-string", "image.tag=chart-ci-missing");
+  assert.match(taggedWithoutClear, /image: "?ghcr\.io\/manziman\/paseo-gateway@sha256:/);
+  const taggedWithClear = render(
+    "--set-string",
+    "image.digest=",
+    "--set-string",
+    "image.tag=chart-ci-missing",
+  );
+  assert.match(taggedWithClear, /image: "?ghcr\.io\/manziman\/paseo-gateway:chart-ci-missing/);
+  assert.doesNotMatch(taggedWithClear, /image: "?ghcr\.io\/manziman\/paseo-gateway@sha256:/);
+  const smoke = readFileSync("scripts/chart-smoke.sh", "utf8");
+  assert.match(
+    smoke,
+    /helm upgrade paseo "\$CHART_PACKAGE" "\$\{install_args\[@\]\}"\s*\\\s*--set-string image\.digest= --set-string image\.tag=chart-ci-missing/,
+  );
+});
 test("chart-only recovery compares archive bytes and never replaces mismatched published bytes", (t) => {
   const output = temporary(t);
   const archive = join(output, `paseo-kubernetes-${version}.tgz`);

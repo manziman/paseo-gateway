@@ -37,6 +37,9 @@ export function buildServerInfo(
       providersSnapshotCwd: true,
       directorySync: true,
       workspaceMultiplicity: true,
+      // The gateway routes versioned file writes and owned file observations to
+      // the selected workspace. The Desktop shows its editor only with this flag.
+      workspaceFileEditing: true,
       agentThinkingUpdate: true,
       selectiveAgentTimeline: true,
       daemonStatusRpc: true,

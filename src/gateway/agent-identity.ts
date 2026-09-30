@@ -47,6 +47,11 @@ function same(left: z.infer<typeof Binding>, right: z.infer<typeof Binding>) {
   );
 }
 
+/** A well-formed lookup has no usable route in the caller's current scope.
+ * Storage failures and malformed records must remain ordinary hard errors.
+ */
+export class AgentRouteUnavailableError extends Error {}
+
 /** Durable, UID-bound routing of native GUIDs. Cache affects claim performance only;
  * every inbound lookup reads the authoritative record and current caller scope.
  */
@@ -196,7 +201,10 @@ export class AgentIdentityRegistry {
     const legacy = publicOrLegacyId.includes("~") ? parseScopedId(publicOrLegacyId) : undefined;
     const id = z.guid().parse(legacy?.backendId ?? publicOrLegacyId);
     const record = await this.read(id);
-    if (!record) throw new Error("Unknown agent identity route; refresh the agent directory");
+    if (!record)
+      throw new AgentRouteUnavailableError(
+        "Unknown agent identity route; refresh the agent directory",
+      );
     const value = record.value;
     if (value.state === "collision")
       throw new Error("Native agent GUID is quarantined after a workspace collision");
@@ -206,7 +214,7 @@ export class AgentIdentityRegistry {
       (row) => row.metadata.name === value.workspaceId && row.metadata.uid === value.workspaceUid,
     );
     if (!workspace || workspace.metadata.deletionTimestamp)
-      throw new Error("Agent workspace UID changed or access was revoked");
+      throw new AgentRouteUnavailableError("Agent workspace UID changed or access was revoked");
     return { workspace, backendAgentId: value.backendAgentId };
   }
 }
