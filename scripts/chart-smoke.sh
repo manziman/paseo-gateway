@@ -296,7 +296,8 @@ assert_retained
 
 if [[ "${CHART_NEGATIVE:-0}" == 1 ]]; then
   if helm upgrade paseo "$CHART_PACKAGE" "${install_args[@]}" \
-    --set-string image.tag=chart-ci-missing --atomic --wait --timeout 45s >/dev/null 2>&1; then
+    --set-string image.digest= --set-string image.tag=chart-ci-missing \
+    --atomic --wait --timeout 45s >/dev/null 2>&1; then
     echo 'A broken gateway image unexpectedly passed the upgrade readiness gate' >&2
     exit 1
   fi
