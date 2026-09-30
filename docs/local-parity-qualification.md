@@ -1039,3 +1039,58 @@ sequence ranges. The corrected verifier counts distinct calls, requires terminal
 states including cancellation, and checks file absence and unchanged prompt IDs.
 It passed without resending or modifying the completed fixture. This qualifies
 Stop while awaiting permission, not cancellation of an executing shell command.
+
+
+## Desktop file subscriptions and gateway replacement — 2026-09-30
+
+The file pane requires `workspaceFileEditing`; the gateway now advertises it
+with subscriptions bound to the workspace UID and normalized path. Independent
+review and regressions cover cross-workspace ID collisions, authority changes,
+registration/release races, bounded metadata, failed initial subscriptions and
+acknowledgement-before-update ordering. The full check passed 449 unit tests,
+14 PR-title checks, 38 release checks and 19 qualification checks, plus lint,
+type checking and build.
+
+The local gateway built from `e2e7a3b` was deployed at
+`sha256:b6abbdbd5fe21e047435fa92e84b8669493933f4494a4c40cfcdb706db83ad45`.
+The two test workspace Pods and terminal IDs remained unchanged. The SDK read
+both retained terminal markers with no cross-workspace output after the gateway
+Pod UID changed. A separate one-shot live SDK file probe passed create, read,
+subscribe, versioned write, live update and unsubscribe; a later write produced
+no callback on the released subscription. The operator then used those same open terminal tabs to print new distinct
+markers. Both accepted input and showed only their own output without creating
+new terminals. The operator then opened the prepared text file through the
+built-in Files panel, edited it and saved. A read-only SDK verification confirmed
+the exact expected contents in A and file absence in B, with the same workspace
+and Pod identities. The workspace menu’s **Open in file manager** instead
+invokes the desktop operating system’s file manager; that local action cannot
+open a Kubernetes workspace path. Use the built-in Files panel for remote files.
+
+A verified-TLS wire probe rejected an invalid owner password with HTTP 401.
+Owner and short-lived workspace-scoped sessions returned the expected feature
+and permission snapshots, read the permitted project and agent, and denied
+scoped token minting. The scoped project list contained only its authorized
+project. This compares the advertised role surface with recorded handler and
+live evidence; it is not a fresh execution of every advertised mutation.
+
+Before replacement, the old gateway accepted the authenticated connection but
+closed it while fetching the first test agent. The forwarding helper had no
+contemporaneous failure, and both workspace Pods were Ready with zero restarts.
+After replacement, both direct native and gateway-mediated fetches passed. The
+pre-replacement closure trigger was not captured, so recovery does not establish
+its root cause. No workspace restart or prompt replay was used.
+
+
+The operator closed both root agent chat tabs without errors. Both agents had
+`archivedAt` set and no pending permission. The initial verifier expected the
+live message IDs and sequence numbers to remain identical; native archival
+reconstructed B's transcript with different IDs and sequence numbers. Direct
+native and gateway reads returned the same complete timeline, and all three
+user-message content hashes matched the original submitted prompts in order.
+The corrected verifier checks the original prompt count, content and order;
+it passed without resending a prompt or modifying either archived agent.
+The operator then archived both disposable workspaces through their sidebar
+menus without errors. Read-only verification confirmed both original workspace
+UIDs reached Archived, their Pods were absent, and the original PVC identities
+were preserved. All fourteen local client matrix rows now have passing evidence
+within the agreed scope; exact-artifact and EKS qualification remain separate.
