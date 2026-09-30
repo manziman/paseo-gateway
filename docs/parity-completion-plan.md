@@ -1,7 +1,11 @@
 # Full parity completion plan
 
-Baseline: the published `v1.0.0-alpha.3` has real Claude, private Git, scheduled
+The prior published `v1.0.0-alpha.3` has real Claude, private Git, scheduled
 worker, scoped authentication, storage lifecycle and recovery qualification.
+The published `v1.0.0-alpha.5` adds the implemented parity work. Its
+[qualification record](https://github.com/manziman/paseo-gateway/releases/download/v1.0.0-alpha.5/qualification.md)
+records exact-artifact local installation, provider, upgrade and scheduled
+private-worker checks; earlier local and alpha.3 evidence is kept separate.
 The target is the headless single-host workflow in [epic #16](https://github.com/manziman/paseo-gateway/issues/16)
 plus required unchanged client flows from the v0.1 specification. This plan does
 not turn an experimental release into a full-parity support claim.

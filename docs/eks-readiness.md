@@ -8,26 +8,32 @@ or encrypted transport.
 
 ## Candidate gate
 
-Complete these local checks before selecting the EKS candidate:
+The permission-disconnect and retained-history fixes are merged, with regression,
+native daemon, security and chart checks. Real local permission denial and
+approval reached the intended workers; CLI exit alone was not used as proof.
+The [local qualification log](local-parity-qualification.md) and
+[Desktop checklist](manual-desktop-acceptance.md) record the completed fresh
+preference/cold catalog, selected nondefault branch, automatic first turn and
+stopped-conversation checks. Old images and stopped volumes without a committed
+history snapshot still have an explicit migration limit.
 
-1. Merge the permission-disconnect and retained-history fixes after their
-   regression, native daemon, security and chart checks pass. Replay an actual
-   CLI permission denial; a successful command exit alone does not prove the
-   waiting agent received the decision.
-2. Run the remaining [Desktop checks](manual-desktop-acceptance.md): a fresh
-   preference profile with a cold project catalog, nondefault branch selection,
-   first-turn activity without refresh, and opening a stopped conversation from
-   a newly captured history snapshot. Keep old-image history limitations explicit.
-3. Stage and qualify one immutable public alpha artifact set using the
-   [release runbook](releasing.md). Record exact image and chart digests for the
-   install, recovery, provider and private-worker tests. Development-image
-   evidence does not qualify a different published image.
+The published [alpha.5 release](https://github.com/manziman/paseo-gateway/releases/tag/v1.0.0-alpha.5)
+identifies source `4b3a2f4a8cbb565dc2150ef6a43ddd7061f58433` and immutable
+gateway, workspace and chart digests. Its downloaded assets passed checksum and
+anonymous-consumption verification. Fresh-chart acceptance passed with the exact
+artifacts. Authenticated Claude, Codex and OpenCode prompts, Claude/Codex
+active-turn recovery, GitHub App renewal, and the private scheduled
+orchestrator/worker workflow passed on those image digests. The existing
+installation upgrade preserved original workspace/Pod/PVC identities and
+credential authorities. The [release qualification record](https://github.com/manziman/paseo-gateway/releases/download/v1.0.0-alpha.5/qualification.md)
+separates those exact-artifact results from earlier Desktop observations,
+unselected fault tests and the test-only Git harness correction.
 
-The [local qualification log](local-parity-qualification.md) distinguishes
-completed observations from pending checks. EKS validation and actual provider
-expiry or independently valid credential rotation remain separate gates; neither
-is satisfied by generated-invalid credential tests. Do not mark the parity epic
-complete merely because the candidate is ready for cloud validation.
+Operator-led EKS validation is next and remains a separate gate. Actual
+provider-side expiry, independently valid credential replacement, EKS storage
+fencing and live network enforcement are not established by the local checks.
+Do not mark the full-parity epic complete merely because a public alpha is
+available or a candidate is ready for cloud validation.
 
 ## Operator prerequisites
 
