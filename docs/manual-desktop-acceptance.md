@@ -82,6 +82,12 @@ zero-Ready cold-start scenario subsequently passed on 2026-09-30, including
 nondefault branch selection and automatic first-turn activity. Its observed
 discovery delays are recorded separately from functional success.
 
+On 2026-09-30, the operator also opened a newly captured stopped conversation in
+the fresh Desktop 0.10.2 profile and confirmed its saved prompt, command activity
+and exact reply without resuming or resending. The workspace remained Suspended
+with the same UID. This completes the manual stopped-history check for the
+recorded candidate; older uncaptured histories retain the documented limits.
+
 Use only an authorized small test project and clearly named test workspaces. Mark each item **PASS**, **FAIL**, or **BLOCKED** with the app version, timestamp, a short observed result, and a redacted screenshot or local evidence reference. A missing UI action is **BLOCKED/not exposed**, not a protocol failure.
 
 Existing suspended acceptance fixtures can have red workspace dots: the pinned

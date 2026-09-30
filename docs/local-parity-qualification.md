@@ -10,9 +10,9 @@ the explicitly repeated checks and recorded images. Current pre-EKS status:
 | GitHub App mint/renew, private Git and actual revocation/recovery | Passed; elapsed-time expiry is a distinct unexecuted case |
 | Credential rejection | Generated-invalid provider checks passed; do not equate them with provider-side expiry or independent valid-login rotation |
 | Desktop live activity, isolation, reconnect, terminals, attachment/file links, labels and schedules | Operator confirmations recorded below |
-| Scoped CLI permission resolution | Disconnect fix and pinned CLI contract pass; real two-workspace denial/approval replay remains pending (#77) |
-| Fresh-preference zero-Ready Desktop/ref picker | Pending final-candidate operator check (#65/#67) |
-| Stopped uncached transcript | Bounded PVC snapshots implemented and reviewed; native image and stopped Desktop acceptance remain pending (#76) |
+| Scoped CLI permission resolution | Pinned CLI contract and real two-workspace denial/approval replay passed (#77) |
+| Fresh-preference zero-Ready Desktop/ref picker | Passed in Desktop 0.10.2; cold discovery delays recorded separately (#65/#67) |
+| Stopped uncached transcript | Native snapshot contracts, repeated live SDK reads and fresh-profile Desktop viewing passed on the recorded candidates (#76) |
 | Secured checkout receipt | Restart, exhaustion, same-PVC recovery and UID-fenced cleanup passed on fault-injection derivatives |
 | Gateway memory | Targeted reproduction/mitigation and 80-minute process-age observation passed, with a recorded host-sleep sampling gap |
 | EKS CSI, network enforcement, node-loss fencing and exact cloud candidate | Pending isolated operator-led validation (#61) |
@@ -944,5 +944,48 @@ The gateway was a full production Dockerfile build from `8f28108`, digest
 the workspace used the unchanged
 `sha256:b27fd3532959b66d38bd8272da4d1a44f782dbbe7a2c38d2e0383472219132ce`.
 This supplies the previously pending fresh-profile catalog, branch-picker and
-first-turn Desktop evidence. Stopped-history repeat-read acceptance and exact
-published-artifact qualification remain separate gates.
+first-turn Desktop evidence. The following section records stopped-history
+acceptance. Exact published-artifact qualification remains separate.
+
+## Stopped-history live replay — 2026-09-30
+
+The preceding day's full-image fixture completed a real Claude turn with a
+command, captured three native projected timeline entries on its retained PVC,
+and suspended. A fresh SDK client listed the saved agent as closed, subscribed
+to its timeline, and read the original prompt, command and reply without a
+workspace daemon. A watched reader Pod was created and deleted with the same
+UID. The harness's immediate final-state assertion failed; a separate read-only
+check confirmed the same workspace generation and PVC, no daemon or reader,
+and a completed Suspended state.
+
+Follow-up regressions found two distinct races. Reconciliation temporarily
+changed a completed stopped workspace to Pending while its reader existed.
+Also, an immediate second read could encounter a reader whose deletion had
+been acknowledged but whose Pod still existed. The fixes preserve completed
+stopped state, serialize same-workspace reads, wait within the deadline for
+owned terminating readers, and recheck workspace and PVC identity. Tests cover
+concurrent reads, queued cancellation, changed authority and foreign readers.
+
+Before the reuse fix, the live sequence read once successfully and failed on
+the second read. After the fix, three consecutive fresh-client reads all passed:
+each returned the same three entries with exactly one user and assistant marker
+and a command, while the workspace's stopped state and resourceVersion remained
+unchanged. The original PVC UID was preserved throughout.
+
+The successful gateway was built from `82e047d`, digest
+`sha256:8559be60bdc9fee6f1d22cc684512a6a5c5d1c12a9d1779a6ca5ee22d154365a`.
+An earlier local build of that source had unreadable package-file permissions
+caused by the private archive-extraction harness. It failed startup and Helm
+rolled back successfully. The harness was corrected to preserve explicit source
+file modes; a network-isolated runtime check failed on the original image and
+passed on the replacement before deployment. The successful gateway started
+with zero container restarts. This build correction did not change repository
+code or the production Dockerfile.
+
+The combined repository checks passed 433 tests, typecheck, lint, release and
+qualification checks, and build. The operator then confirmed that Desktop
+0.10.2's fresh QA profile displayed the stopped conversation's original prompt,
+command activity and exact reply without resuming or resending. A subsequent
+read-only check confirmed the same workspace UID remained Suspended. This
+completes the manual stopped-conversation check; published-artifact qualification
+and EKS validation remain separate.

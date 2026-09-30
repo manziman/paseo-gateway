@@ -169,7 +169,10 @@ archived with their PVCs retained.
   provider; see [retained history](retained-history.md) for limits and migration.
   Old images, failed captures and already-stopped volumes without a committed
   snapshot report explicit uncached-history unavailability. Metadata alone cannot
-  reconstruct transcripts. Final native-image and Desktop acceptance is pending.
+  reconstruct transcripts. Native snapshot contracts, repeated live SDK reads
+  and fresh-profile Desktop viewing passed on the recorded local candidates;
+  see [qualification evidence](local-parity-qualification.md). Published artifact
+  and EKS qualification remain separate.
   Archived Ephemeral storage has been released, so its transcript may be gone.
 - File/Git operations and terminal traffic route to their workspace. Attachment
   uploads are bounded and staged until an agent operation identifies the target;
