@@ -5,9 +5,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { resourceName } from "../src/controller/resources.js";
-import { scopedId, workspacePath } from "../src/domain.js";
+import { workspacePath } from "../src/domain.js";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
+import { liveConnection, liveConnectionConfig } from "./live-connection.js";
 import { context, namespace } from "./local-config.js";
+import { privateWorkerWorkspace } from "./private-live-identity.js";
 
 // Explicitly opt in: this suite pushes a dedicated branch and opens a draft PR.
 if (process.env.RUN_PRIVATE_LIVE !== "1")
@@ -19,7 +21,8 @@ const projectId = process.env.PASEO_TEST_PROJECT;
 if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository) || !projectId)
   throw new Error("Set PASEO_TEST_REPOSITORY=owner/repo and PASEO_TEST_PROJECT");
 const store = new KubernetesStore(loadKubernetesConfig(context), namespace);
-const encoded = (await store.secret("paseo-identity")).data?.password;
+const connectionConfig = await liveConnectionConfig();
+const encoded = (await store.secret(connectionConfig.identitySecret)).data?.password;
 if (!encoded) throw new Error("Gateway identity is unavailable");
 const password = Buffer.from(encoded, "base64").toString("utf8");
 const suffix = randomUUID().slice(0, 8);
@@ -80,8 +83,10 @@ try {
       reject(new Error("Cannot start port-forward"));
     });
   });
+  const connection = liveConnection(port, connectionConfig);
   const active = new DaemonClient({
-    url: `ws://127.0.0.1:${port}/ws`,
+    url: connection.url,
+    transportFactory: connection.transportFactory,
     password,
     clientId: randomUUID(),
     reconnect: { enabled: false },
@@ -164,10 +169,13 @@ try {
   assert.equal(inventory.entries.length, 1, "Orchestrator must create exactly one labeled worker");
   const worker = inventory.entries[0]?.agent;
   assert.ok(worker);
-  assert.ok(
-    !worker.id.startsWith(`${workspace.metadata.name}~`),
-    "Worker must use another workspace pod",
+  const workerWorkspace = privateWorkerWorkspace(
+    worker,
+    await store.workspaces(),
+    projectId,
+    workspace.metadata.name,
   );
+  assert.notEqual(resourceName(workerWorkspace), pod, "Worker must use another workspace Pod");
   const finished = await active.waitForFinish(worker.id, 180000);
   assert.equal(finished.status, "idle");
   assert.ok(finished.lastMessage?.includes(`${marker}-worker`));
@@ -213,12 +221,13 @@ try {
     return latest?.status === "succeeded" ? latest : undefined;
   }, "scheduled run and archive");
   assert.ok(run.workspaceId && run.agentId);
-  const archivedAgentId = scopedId(run.workspaceId, run.agentId);
   const archivedInventory = await active.fetchAgents({
     filter: { projectKeys: [projectId], includeArchived: true },
   });
   assert.ok(
-    archivedInventory.entries.some((entry) => entry.agent.id === archivedAgentId),
+    archivedInventory.entries.some(
+      (entry) => entry.agent.id === run.agentId && entry.agent.workspaceId === run.workspaceId,
+    ),
     "Archived scheduled agent remains listed",
   );
   const scheduledWorkers = await active.fetchAgents({
@@ -226,7 +235,13 @@ try {
   });
   assert.equal(scheduledWorkers.entries.length, 1, "Scheduled orchestrator must create one worker");
   const scheduledWorker = scheduledWorkers.entries[0]?.agent;
-  assert.ok(scheduledWorker && !scheduledWorker.id.startsWith(`${run.workspaceId}~`));
+  assert.ok(scheduledWorker);
+  const scheduledWorkspace = privateWorkerWorkspace(
+    scheduledWorker,
+    await store.workspaces(),
+    projectId,
+    run.workspaceId,
+  );
   const scheduledResult = await active.waitForFinish(scheduledWorker.id, 30000);
   assert.equal(scheduledResult.status, "idle");
   const scheduledPr = scheduledResult.lastMessage?.match(
@@ -237,11 +252,6 @@ try {
     scheduledPr.startsWith(`https://github.com/${repository}/pull/`),
     "Scheduled worker must return authorized-repository PR",
   );
-  const scheduledWorkspaceId = scheduledWorker.id.split("~")[0];
-  const scheduledWorkspace = (await store.workspaces()).find(
-    (entry) => entry.metadata.name === scheduledWorkspaceId,
-  );
-  assert.ok(scheduledWorkspace);
   const scheduledPod = resourceName(scheduledWorkspace);
   assert.equal(await inPod(scheduledPod, ["git", "branch", "--show-current"]), scheduledBranch);
   assert.equal(
