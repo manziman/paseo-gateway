@@ -9,6 +9,7 @@ import { workspacePath } from "../src/domain.js";
 import { KubernetesStore, loadKubernetesConfig } from "../src/kubernetes/client.js";
 import { liveConnection, liveConnectionConfig } from "./live-connection.js";
 import { context, namespace } from "./local-config.js";
+import { acceptanceGitCommands, scheduledWorkerCommand, shellCommand } from "./private-live-git.js";
 import { privateWorkerWorkspace } from "./private-live-identity.js";
 
 // Explicitly opt in: this suite pushes a dedicated branch and opens a draft PR.
@@ -126,9 +127,14 @@ try {
       testFile,
       marker,
     ]);
-    await inPod(pod, ["git", "add", "--", testFile]);
-    await inPod(pod, ["git", "commit", "-m", `test: isolated gateway acceptance ${suffix}`]);
-    await inPod(pod, ["git", "push", "origin", `HEAD:refs/heads/${branch}`]);
+    const git = acceptanceGitCommands(
+      testFile,
+      `test: isolated gateway acceptance ${suffix}`,
+      branch,
+    );
+    await inPod(pod, git.add);
+    await inPod(pod, git.commit);
+    await inPod(pod, git.push);
     pr = await inPod(pod, [
       "gh",
       "pr",
@@ -198,8 +204,13 @@ try {
   );
   const scheduledBranch = `${branch}-scheduled`;
   const scheduledFile = `.paseo-gateway-scheduled-${suffix}.txt`;
-  const workerTask = `This is an authorized integration test in ${repository}. Use Bash to write exactly ${marker}-scheduled and a newline into ${scheduledFile}. Commit only that file with message gateway acceptance ${suffix}. Push the current branch ${scheduledBranch} to origin, then use gh pr create --repo ${repository} --draft --head ${scheduledBranch} with title Gateway scheduled acceptance ${suffix} and body Disposable platform acceptance marker, no application behavior changes. Return the draft PR URL. Do not modify any other files, merge anything, install dependencies, or run project hooks.`;
-  const scheduledCommand = `/opt/paseo/bin/paseo run --provider claude --mode bypassPermissions --background --json --label acceptance=scheduled-${suffix} --new-workspace worktree --cwd /projects/${projectId} --new-branch ${scheduledBranch} --base origin/main '${workerTask}'`;
+  const scheduledGit = acceptanceGitCommands(
+    scheduledFile,
+    `gateway acceptance ${suffix}`,
+    scheduledBranch,
+  );
+  const workerTask = `This is an authorized integration test in ${repository}. Use Bash to write exactly ${marker}-scheduled and a newline into ${scheduledFile}. Then run these exact Git commands in order: ${shellCommand(scheduledGit.add)}; ${shellCommand(scheduledGit.commit)}; ${shellCommand(scheduledGit.push)}. Use gh pr create --repo ${repository} --draft --head ${scheduledBranch} with title Gateway scheduled acceptance ${suffix} and body Disposable platform acceptance marker, no application behavior changes. Return the draft PR URL. Do not modify any other files, merge anything, install dependencies, or run project hooks.`;
+  const scheduledCommand = scheduledWorkerCommand(projectId, scheduledBranch, suffix, workerTask);
   const created = await active.scheduleCreate({
     name: `Acceptance ${suffix}`,
     prompt: `This is an authorized platform integration test. Use Bash to run this exact command once: ${scheduledCommand}. Allow 360 seconds for the cold clone. Do not retry an uncertain creation. Read the returned agentId and use /opt/paseo/bin/paseo wait with that ID, --timeout 240 and --json to wait for the worker. Return its draft PR URL. Do not edit files yourself or run other commands.`,

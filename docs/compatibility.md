@@ -25,13 +25,17 @@ Passing fixture contracts does not establish live private-repository or provider
 
 ## Published alpha and remaining parity
 
-The latest published baseline is `v1.0.0-alpha.3`. Its
+The latest published candidate is
+[`v1.0.0-alpha.5`](https://github.com/manziman/paseo-gateway/releases/tag/v1.0.0-alpha.5).
+Its [qualification record](https://github.com/manziman/paseo-gateway/releases/download/v1.0.0-alpha.5/qualification.md)
+identifies the exact source revision and immutable gateway, workspace and chart
+digests, with Docker Desktop installation/recovery, authenticated provider,
+GitHub App renewal and private scheduled-worker evidence. The prior alpha.3
 [qualification record](https://github.com/manziman/paseo-gateway/releases/download/v1.0.0-alpha.3/qualification.md)
-adds clean public-artifact installation, cross-role denial, upgrade/rollback and
-reinstall evidence to the earlier development-candidate results below. The
-[completion plan](parity-completion-plan.md) tracks remaining implementation and
-live qualification. EKS deployment and validation are the final operator-assisted
-step; they are not implied by Docker Desktop results.
+is historical evidence for that earlier artifact set, not evidence that alpha.5
+passed the same live scenarios. The [completion plan](parity-completion-plan.md)
+tracks exact-artifact acceptance and remaining full-parity work. Docker Desktop
+results do not establish EKS storage, networking or writer-fencing behavior.
 
 ## Development candidate evidence (0.9.1)
 
@@ -66,12 +70,14 @@ provider/CAS evidence, and authenticated Codex/OpenCode runs and shared Codex
 subscription refresh were unverified. The current development work below does
 not retroactively qualify those published artifacts.
 
-## Full-parity development work
+## Alpha.5 implementation and local evidence
 
-The completion branch adds existing-agent schedules, retained suspended
+Alpha.5 includes existing-agent schedules, retained suspended
 inventory, workspace labels, staged attachments, HTTP downloads, a dedicated
 Codex subscription authority, optional verified TLS, and configurable PVC access
-modes. These changes are not yet a published or fully qualified release.
+modes. Its qualification record describes the executed exact-artifact provider
+and existing-installation upgrade checks and their limits. EKS qualification,
+actual credential expiry/replacement and full parity remain separate gates.
 
 The unmodified pinned SDK and two actual upstream daemon containers have passed
 attachment byte integrity, late workspace binding, consumed-handle rejection,
