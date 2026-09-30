@@ -1,4 +1,4 @@
-# Pinned client acceptance matrix (pending)
+# Pinned client acceptance matrix
 
 For a short operator-run desktop walkthrough, use the [manual desktop acceptance checklist](manual-desktop-acceptance.md).
 
@@ -11,25 +11,65 @@ revision, scenario ID, timestamp, redacted observed result, and linked issue for
 FAIL/BLOCKED. Keep environment identity, account IDs, private endpoints/repos,
 credentials, and raw prompts out of public evidence.
 
+## Local qualification through 2026-09-30
+
+The [local qualification record](local-parity-qualification.md) and
+[manual Desktop checklist](manual-desktop-acceptance.md) document
+successful cold first-turn creation, two-workspace timeline and terminal
+isolation, attachment upload and generated-file opening, schedule and heartbeat
+controls, workspace labels, and a stopped conversation opened without resuming
+its Pod. The operator also denied one agent's permission while the other stayed
+pending, approved the second agent's harmless write, reloaded that idle agent
+without losing history, and stopped a new turn while its tool permission was
+pending. Read-only checks verified the intended Pod effects, unchanged peer
+history, one new prompt/tool identity and no replay. The Stop observation is
+permission-pending cancellation, not cancellation of an executing shell. The
+exact published artifacts and EKS remain separate release gates in
+[#26](https://github.com/manziman/paseo-gateway/issues/26) and
+[#61](https://github.com/manziman/paseo-gateway/issues/61).
+
+The local evidence grader now reports **PASS** for all fourteen required rows
+within the agreed scope. The operator completed workspace archival for both
+disposable fixtures; read-only verification confirmed Archived status, deleted
+Pods and preserved PVC identities. Agent archival preserved the original prompt
+count, contents and order. Desktop editor read/write/save and isolated input in
+the same terminal tabs after gateway replacement also passed.
+
+This result combines versioned observations across the recorded local
+candidates. It does not qualify an unpublished artifact or replace the exact
+published-artifact and EKS gates. Automated socket and Docker contracts remain
+identified separately from operator observations; every required row references
+its specific evidence in the private local ledger.
+
+The connection row combines recorded manual connect/authenticate/reconnect observations with a 2026-09-30 live invalid-password rejection. The same read-only probe captured owner/scoped advertised capabilities, checked expected flags and role permissions, and verified scoped inventory and token-mint refusal. Remaining feature mutations were compared to existing handler contracts and recorded live evidence, not freshly re-executed. This completes the connection/capability comparison; the Desktop editor has its own operator observation and saved-content receipt.
+
+On 2026-09-30 the operator explicitly chose to track interactive Desktop forge
+search separately in [#86](https://github.com/manziman/paseo-gateway/issues/86)
+and finish the headless EKS candidate. PR/issue discovery and selection from
+search are deferred by that agreement, not passed. Explicit CLI/SDK PR checkout
+remains required in the headless inventory below. The relevant Desktop composite
+rows therefore qualify supported branch/workspace and file actions; they do not
+substitute their evidence for the deferred search flow.
+
 ## Headless capability inventory
 
 | # | Contract / expected shape | Handler and existing evidence | Completion gate |
 | --- | --- | --- | --- |
-| 1 | `schedule/create`, `list`, `inspect`, `update`, `delete`, `logs`, `run-once`, `pause`, `resume`; run records carry agent and workspace IDs | `src/gateway/schedules.ts`; `tests/schedules.test.ts`; `scripts/cli-test.ts` | Existing-agent target and real scheduled run/restart, including ambiguous dispatch, remain blocking until #58 and live evidence. |
-| 2 | CLI `run`, `ls -g -a --json`, `wait`, `send`, `stop`, `archive`, `agent update/reload`; SDK agent list/ref | `src/gateway/workspace-operations.ts`, `agent-inventory.ts`; `tests/cli-contract.test.ts`, `tests/client-parity.test.ts`; `scripts/cli-test.ts` | Live multi-Pod run and exact CLI/SDK result comparison. CLI `ls --json` emits display rows with `id`, `shortId`, `name`, `provider`, `thinking`, `status`, `cwd`, relative `created`; inspect SDK for labels, absolute `createdAt`, and `lastError`. |
-| 3 | Workspace create/list/archive; branch-off/base/new-branch, PR checkout, reuse; teardown failure retains data | `src/gateway/workspace-operations.ts`; `tests/workspace-operations.test.ts`; `scripts/checkout-live.ts` | Live Git branch/PR/reuse plus nonzero teardown evidence. Pinned CLI has no `agent worktree` command; use supported `run --new-workspace worktree` and `workspace ls`. |
-| 4 | Private clone, push, PR with scoped Git identity | `scripts/private-live.ts`; `docs/credential-profiles.md` | Live private fixture with redacted fetch/push/draft PR evidence and credential scope. |
-| 5 | Provider `ls`, `models`, `diagnostic`, refresh; runtime image choice | `scripts/cli-test.ts`; `docs/upstream-parity.md` | Exact real provider catalog and refresh after version change; multiple authenticated runtimes depend on #57. |
+| 1 | `schedule/create`, `list`, `inspect`, `update`, `delete`, `logs`, `run-once`, `pause`, `resume`; run records carry agent and workspace IDs | `src/gateway/schedules.ts`; `tests/schedules.test.ts`; `scripts/cli-test.ts` | New-agent Desktop controls and one real Run now passed; existing-agent target/edit/delete passed. SDK run recovery and CLI-supported verbs have contract/live evidence in the [local record](local-parity-qualification.md); exact artifact remains #26. |
+| 2 | CLI `run`, `ls -g -a --json`, `wait`, `send`, `stop`, `archive`, `agent update/reload`; SDK agent list/ref | `src/gateway/workspace-operations.ts`, `agent-inventory.ts`; `tests/cli-contract.test.ts`, `tests/client-parity.test.ts`; `scripts/cli-test.ts` | Pinned CLI/socket and real multi-Pod runs passed locally; CLI `ls --json` is a display projection with relative `created`, while SDK inspection retains absolute `createdAt`, labels and `lastError`. Desktop idle Reload and Stop while a tool permission was pending passed on 2026-09-30; root agent-tab closure and verified agent archival also passed. Workspace archival also passed with Pod removal and preserved PVC identity. This is not executing-shell cancellation evidence. |
+| 3 | Workspace create/list/archive; branch-off/base/new-branch, PR checkout, reuse; teardown failure retains data | `src/gateway/workspace-operations.ts`; `tests/workspace-operations.test.ts`; `scripts/checkout-live.ts` | A nondefault remote branch reached exact Git HEAD in Desktop; private checkout and teardown failure paths have separate local fixture evidence. Desktop nondefault-branch selection passed; workspace archival passed with Archived status, Pod removal and preserved PVC identity. Interactive forge/PR search is explicitly deferred to #86; headless explicit PR checkout remains required. Pinned CLI has no `agent worktree` command. |
+| 4 | Private clone, push, PR with scoped Git identity | `scripts/private-live.ts`; `docs/credential-profiles.md` | Local authorized fixture passed private Git fetch/push/draft PR and scoped identity renewal; exact published-artifact repeat remains #26. |
+| 5 | Provider `ls`, `models`, `diagnostic`, refresh; runtime image choice | `scripts/cli-test.ts`; `docs/upstream-parity.md` | Local native catalog, project/profile separation and fresh Desktop first-model selection passed; exact published-artifact refresh remains #26 and multi-provider credentials remain #57. |
 | 6 | Per-spawn `--env`, profile file projection, provider/home configuration | `scripts/cli-test.ts`; `tests/credentials.test.ts` | Live environment and file behavior with no value logged. |
-| 7 | Single-authority rotating provider and Git identity renewal | `docs/credential-renewal.md`; #56/#57 | Authenticated renewal, concurrent Pods and expiry recovery remain blocking. |
-| 8 | In-Pod scoped CLI `run`/`wait`, separate worker Pod; denial outside scope | `scripts/private-live.ts`; `tests/auth.test.ts` | Real orchestrator/worker and cross-role denial. |
-| 9 | Retained/ephemeral PVC policy and bounded cleanup | `tests/teardown.test.ts`; `docs/operations.md` | Live retention/cleanup with PVC and Secret UID checks. |
-| 10 | Capacity refusal and actionable `Pending`/unschedulable errors | `tests/controller.test.ts`; `docs/operations.md` | Live quota/capacity and bounded failure evidence. |
-| 11 | `permit ls/deny` aggregates two Pods; provider permission IDs stay opaque | `scripts/cli-test.ts`; `tests/gateway.test.ts` | Live two-Pod pending/deny and suspended inventory behavior; #59. |
+| 7 | Single-authority rotating provider and Git identity renewal | `docs/credential-renewal.md`; #56/#57 | Local concurrent Pods and native authority renewal passed; real credential expiry/revocation and separately selected replacement remain open under #57. |
+| 8 | In-Pod scoped CLI `run`/`wait`, separate worker Pod; denial outside scope | `scripts/private-live.ts`; `tests/auth.test.ts` | Real local orchestrator/worker flow and cross-role denial passed; exact published-artifact repeat remains #26. |
+| 9 | Retained/ephemeral PVC policy and bounded cleanup | `tests/teardown.test.ts`; `docs/operations.md` | Local UID-fenced teardown, retained history and PVC cleanup passed; EKS CSI/storage lifecycle remains #61. |
+| 10 | Capacity refusal and actionable `Pending`/unschedulable errors | `tests/controller.test.ts`; `docs/operations.md` | Local fixture covered capacity refusal and bounded Pending/unschedulable diagnosis; EKS failure observation remains #61. |
+| 11 | `permit ls/deny` aggregates two Pods; provider permission IDs stay opaque | `scripts/cli-test.ts`; `tests/gateway.test.ts` | Two real local provider Pods passed CLI denial and SDK approval with scoped file isolation; Desktop denial/approval across the two intended Pods also passed on 2026-09-30 with the other agent unchanged. |
 | 12 | Schedule logs, workspace status/logs, `lastError`, OOM/eviction | `tests/schedules.test.ts`; `docs/operations.md` | Live failure types, SDK error field and run history. |
 | 13 | Reference cache and cold clone fallback | `docs/reference-cache.md`; `scripts/cache-benchmark.mjs` | Live digest-pinned cold/warm comparison where configured. |
 | 14 | Configured private egress | `docs/networking.md`; `docs/eks-qualification.md` | Positive and negative live network probes under #61. |
-| 15 | CLI/client/protocol/daemon 0.9.1 pin | `package.json`; `docs/upstream-parity.md` | Re-run contract/live tests with exact release artifacts. |
+| 15 | CLI/client/protocol/daemon 0.9.1 pin | `package.json`; `docs/upstream-parity.md` | Pinned contract and unmodified-daemon Docker suites passed locally; exact published artifacts remain #26. The installed compatible Desktop 0.10.2 is recorded by version. |
 | 16 | `daemon status` only | `scripts/cli-test.ts` | Status reflects gateway/workspaces. Host recycle/password/reboot administration is intentionally excluded. |
 
 `tests/client-parity.test.ts` uses the pinned SDK over an actual loopback
@@ -54,11 +94,11 @@ flows across at least two isolated Pods and verify no cross-workspace routing.
 | --- | --- | --- |
 | `desktop.connection` | Add direct endpoint, authenticate, disconnect/reconnect; no misleading capability shown | Connection, auth denial, reconnect and advertised capability snapshot |
 | `desktop.project` | List/open configured project, including empty project | Project identity and authorization boundary |
-| `desktop.workspace` | Create branch/PR workspace, list, inspect, archive; empty/archived/suspended display is truthful | Workspace UID/phase transitions; no host filesystem browse promise |
-| `desktop.agent` | Create, send, wait, stop, reload and archive from two Pods | Scoped IDs, terminal state, prompt count, `lastError` on failure |
+| `desktop.workspace` | Create branch workspace, list, inspect, archive; empty/archived/suspended display is truthful; interactive PR discovery deferred to #86 by agreement | Workspace UID/phase transitions; no host filesystem browse promise |
+| `desktop.agent` | Create, send, wait, stop, reload and archive from two Pods; observed Stop is while awaiting permission | Scoped IDs, terminal state, prompt count, `lastError` on failure |
 | `desktop.timeline` | Subscribe, receive ordered events, disconnect, resume with no duplicate prompt | Agent IDs, event order and final history |
 | `desktop.permission` | Observe pending permission and approve/deny in intended Pod; other role denied | Unchanged opaque permission ID and resolution |
-| `desktop.git-file` | Branch/PR checkout, list/read/write file, attachment upload and download | Correct Pod and workspace identity, binary integrity; provider-free Docker transfer evidence in `scripts/upstream-test.ts`, desktop observation still required |
+| `desktop.git-file` | Branch checkout, list/read/write file, attachment upload and download; interactive PR discovery deferred to #86, explicit headless PR checkout tracked above | Correct Pod and workspace identity, binary integrity; provider-free Docker transfer evidence in `scripts/upstream-test.ts`, desktop observation still required |
 | `desktop.terminal` | Open/read/write/close terminal on two Pods, replace gateway, reconnect | Terminal slot identity, output order, no cross-Pod bytes |
 | `desktop.schedule` | In the exposed Schedules screen, create/list/edit/pause/resume/run now/delete a new-agent schedule | Cadence/status/last-run display and exactly one created agent turn; run logs are CLI/SDK evidence |
 | `desktop.existing-agent-schedule` | With an operator-created existing-agent heartbeat on a Ready test agent, inspect its target label/status, edit its cron cadence, and delete it | The correct agent is shown as present; a false “Target gone” or “Agent unavailable” is FAIL. Target display, cadence edit and deletion passed in Desktop 0.9.2 on 2026-09-25; see the [local evidence](local-parity-qualification.md#desktop-existing-agent-heartbeat-target). |
