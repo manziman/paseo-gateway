@@ -3,8 +3,11 @@
 ## Experimental channel
 
 The first public channel is `alpha`. Candidate numbering began at
-`1.0.0-alpha.1`; candidates alpha.1 and alpha.2 stopped during publication and
-are not qualified releases. Installation examples target the alpha.3 candidate.
+`1.0.0-alpha.1`; candidates alpha.1, alpha.2 and alpha.4 stopped during publication
+and are not qualified releases. Alpha.4 failed the workspace image security gate;
+its workflow was subsequently cancelled after a separate Desktop regression was
+found. Its reserved tag and any partially pushed artifacts remain immutable.
+Installation examples target the alpha.3 candidate.
 Install only a version advertised in GitHub releases. These are SemVer
 prereleases, not a stable 1.0 support promise. The existing package version
 `0.1.0-poc.1` and old non-Conventional Git history are development history and are

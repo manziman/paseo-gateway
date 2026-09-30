@@ -35,6 +35,47 @@ const nativeFetch = globalThis.fetch;
 let gateway: Awaited<ReturnType<typeof startGateway>> | undefined;
 let client: DaemonClient | undefined;
 
+function verifyWorkspaceNpmBundle() {
+  const image = process.env.UPSTREAM_TEST_IMAGE ?? "paseo-workspace:dev";
+  const isolation = ["run", "--rm", "--network", "none", "--read-only", "--user", "1000:1000"];
+  assert.equal(
+    docker(...isolation, "--entrypoint", "npm", image, "--version"),
+    "12.1.0",
+    "The pinned workspace npm CLI must remain usable",
+  );
+  const contract = `
+    const assert = require('node:assert/strict');
+    const { createServer } = require('node:http');
+    const root = '/usr/local/lib/node_modules/npm/node_modules';
+    const bracePackage = require(root + '/brace-expansion/package.json');
+    const undiciPackage = require(root + '/undici/package.json');
+    assert.equal(bracePackage.version, '5.0.11');
+    assert.equal(undiciPackage.version, '6.28.1');
+    const { expand } = require(root + '/brace-expansion/dist/commonjs/index.js');
+    assert.deepEqual(expand('file-{one,two}.txt'), ['file-one.txt', 'file-two.txt']);
+    const { request } = require(root + '/undici');
+    const server = createServer((_req, response) => response.end('npm-bundle-ok'));
+    server.listen(0, '127.0.0.1', async () => {
+      try {
+        const address = server.address();
+        assert.ok(address && typeof address !== 'string');
+        const response = await request('http://127.0.0.1:' + address.port + '/', {
+          signal: AbortSignal.timeout(3000),
+        });
+        assert.equal(response.statusCode, 200);
+        assert.equal(await response.body.text(), 'npm-bundle-ok');
+      } catch (error) {
+        process.exitCode = 1;
+        console.error(error);
+      } finally {
+        server.close();
+      }
+    });
+  `;
+  docker(...isolation, "--entrypoint", "node", image, "-e", contract);
+  console.log("PASS: checksum-pinned npm bundle versions, brace expansion, and local Undici HTTP.");
+}
+
 // The production gateway requests each workspace's internal Service URL. Docker
 // fixtures have published loopback ports instead, so adapt only our two owned
 // Service hostnames; the actual daemon handles the HTTP download request.
@@ -246,6 +287,7 @@ async function connectGateway() {
 }
 
 try {
+  verifyWorkspaceNpmBundle();
   for (const id of ["one", "two"]) await startDaemon(id);
   console.log("Two unmodified upstream daemons are running in isolated containers.");
   let active = await connectGateway();
