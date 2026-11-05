@@ -1,7 +1,7 @@
 # Paseo 0.9.1 uses esbuild 0.25.12 at runtime for plugin compilation. Rebuild
 # that exact esbuild source with a patched Go toolchain; the prebuilt binary
 # bundled in the upstream image uses Go 1.23.12.
-FROM --platform=$BUILDPLATFORM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS esbuild
+FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:d9b6a1beb9474adc2a1ce842573639b44b2a0dd49b6669f51d3821baf9ec37c9 AS esbuild
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
