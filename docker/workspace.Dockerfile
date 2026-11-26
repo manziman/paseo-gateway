@@ -25,7 +25,7 @@ RUN mkdir -p /patched-linkify /patched-uc-micro \
     && tar -xzf /tmp/brace-expansion.tgz -C /patched-brace-expansion --strip-components=1 \
     && tar -xzf /tmp/undici.tgz -C /patched-undici --strip-components=1
 
-FROM ghcr.io/getpaseo/paseo:0.9.1@sha256:9aae08258b6ff85853da3144ef48c2fd355cfe644500ca4d6041753da589098d
+FROM ghcr.io/getpaseo/paseo:0.17.4@sha256:b39a2edc3eac6f1777617535fe6f685be7326f9a24b370da6db24b35c57462cb
 ARG TARGETARCH
 ARG RELEASE_VERSION=0.1.0-poc.1
 ARG RELEASE_REVISION=development
